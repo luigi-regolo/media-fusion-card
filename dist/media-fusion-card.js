@@ -33,7 +33,7 @@ const escapeHtml = v => String(v ?? "").replace(/[&<>"']/g,c=>({"&":"&amp;","<":
 const clamp = (v,min,max) => Math.min(max,Math.max(min,Number(v)));
 const ICON_MAP = Object.freeze({"tv":"television","power":"power","volume":"volume-high","mute":"volume-off","remote":"remote-tv","chevron":"chevron-right","arrow":"arrow-right","list":"format-list-bulleted","fire":"fire","play":"play","pause":"pause","prev":"skip-previous","next":"skip-next","minus":"minus","plus":"plus","sun":"white-balance-sunny","moon":"weather-night","glow":"lightbulb-on-outline","zap":"lightning-bolt-outline","spark":"auto-fix","home":"home","back":"arrow-left","up":"chevron-up","down":"chevron-down","left":"chevron-left","right":"chevron-right","close":"close","check":"check","settings":"cog-outline","info":"information-outline","loading":"loading"});
 const ico = (id,cls="sm") => `<ha-icon class="ico ${cls}" icon="mdi:${ICON_MAP[id]||"information-outline"}" aria-hidden="true"></ha-icon>`;
-const MEDIA_PREVIOUS_TRACK = 16, MEDIA_NEXT_TRACK = 32, MEDIA_TURN_ON = 128, MEDIA_TURN_OFF = 256, MEDIA_SELECT_SOURCE = 2048;
+const MEDIA_VOLUME_SET = 4, MEDIA_PREVIOUS_TRACK = 16, MEDIA_NEXT_TRACK = 32, MEDIA_TURN_ON = 128, MEDIA_TURN_OFF = 256, MEDIA_SELECT_SOURCE = 2048;
 const supports = (state,feature) => Number.isInteger(state?.attributes?.supported_features) && (state.attributes.supported_features & feature)===feature;
 const shownName = (custom,state,fallback) => short(custom,short(state?.attributes?.friendly_name,fallback)).slice(0,70);
 const stateIcon = (state,fallback) => /^mdi:[a-z0-9-]+$/.test(state?.attributes?.icon||"") ? state.attributes.icon : fallback;
@@ -132,6 +132,8 @@ const EXTRA_CSS = `
 button.dialog-item:hover{box-shadow:inset 0 0 0 1px var(--emerald)}
 .dialog-item.active:hover{box-shadow:inset 0 0 0 2px var(--emerald)}
 .dialog button:focus-visible,.circle-btn:focus-visible{outline:2px solid var(--emerald);outline-offset:2px}
+.dialog-content{overflow-y:auto;overscroll-behavior:contain}
+.remote-switcher{position:sticky;top:-12px;z-index:2;margin:-12px -18px 14px;padding:12px 18px 10px;background:var(--panel);border-bottom:1px solid var(--line)}
 .diag{display:grid;gap:8px;margin-top:8px}
 .diag-row{background:var(--panel2);border-radius:14px;padding:10px 12px}
 .diag-row .dn{font-size:13px;font-weight:600}
@@ -257,19 +259,21 @@ class MediaFusionCard extends HTMLElement {
     if(title)title.textContent=short(s?.attributes?.media_title,"Riproduzione");
     this._setText("trackMeta",!available?"Non disponibile":short(s?.attributes?.media_artist,s?.state==="playing"?"Riproduzione attiva":"Controlli multimediali"));
     const hasVol=available&&Number.isFinite(Number(s?.attributes?.volume_level))&&s?.attributes?.volume_level!==null&&s?.attributes?.volume_level!==undefined;
+    const canSet=available&&supports(s,MEDIA_VOLUME_SET),ctl=hasVol||canSet;
     const value=hasVol?Math.round(clamp(Number(s.attributes.volume_level)*100,0,100)):0;
-    if(this._pendingVolume && (!hasVol || Math.abs(value-this._pendingVolume.value)<=1 || Date.now()>this._pendingVolume.until))this._pendingVolume=null;
-    const presented=this._pendingVolume?.value ?? value;
+    if(this._pendingVolume && (!available || (hasVol&&Math.abs(value-this._pendingVolume.value)<=1) || Date.now()>this._pendingVolume.until))this._pendingVolume=null;
+    const known=hasVol||(canSet&&Number.isFinite(this._lastSetVolume));
+    const presented=this._pendingVolume?.value ?? (hasVol?value:(known?this._lastSetVolume:0));
     const muted=s?.attributes?.is_volume_muted===true;
-    this._q("volGroup").hidden=!hasVol;this._q("volLine").hidden=!hasVol;
-    this._q("noVol").hidden=hasVol||!c.alexa_entity;
+    this._q("volGroup").hidden=!ctl;this._q("volLine").hidden=!ctl;
+    this._q("noVol").hidden=ctl||!c.alexa_entity;
     this._setText("noVolTitle",!available?"Dispositivo non disponibile":"Volume non disponibile");
-    this._setText("noVolText",!available?"Controlla che il dispositivo sia acceso e raggiungibile da Home Assistant.":"L'entità non fornisce il livello del volume. Avvia una riproduzione o scegli un'altra entità.");
-    if(!this._editingVolume){this._q("volume").value=String(presented);this._updateVolVisual(hasVol?presented:null,muted);}
+    this._setText("noVolText",!available?"Controlla che il dispositivo sia acceso e raggiungibile da Home Assistant.":"Questa entità non permette di regolare il volume. Scegli un'altra entità.");
+    if(!this._editingVolume){this._q("volume").value=String(presented);this._updateVolVisual(known?presented:null,muted);}
     this._q("volMinus").disabled=!hasVol;
     this._q("volPlus").disabled=!hasVol;
     this._q("volMute").disabled=!available||typeof s?.attributes?.is_volume_muted!=="boolean";
-    this._q("volume").disabled=!hasVol;
+    this._q("volume").disabled=!ctl;
     this._q("alexaPlay").disabled=!available;
     this._q("alexaPlay").innerHTML=ico(s?.state==="playing"?"pause":"play");
     this._q("alexaPrev").hidden=!(available&&supports(s,MEDIA_PREVIOUS_TRACK));
@@ -386,7 +390,7 @@ class MediaFusionCard extends HTMLElement {
   }
   _setVolume(pct){
     const n=Math.round(clamp(pct,0,100));
-    this._pendingVolume={value:n,until:Date.now()+3500};
+    this._pendingVolume={value:n,until:Date.now()+3500};this._lastSetVolume=n;
     this._updateVolVisual(n,false);
     this._send("media_player","volume_set",this._config.alexa_entity,{volume_level:n/100},"alexa-volume");
   }
