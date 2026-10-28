@@ -1,4 +1,5 @@
 {
   "name": "Media Fusion Card",
-  "filename": "media-fusion-card.js"
+  "filename": "media-fusion-card.js",
+  "render_readme": true
 }
