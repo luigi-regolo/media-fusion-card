@@ -9,19 +9,19 @@
 const CARD_TAG = "media-fusion-card";
 const EDITOR_TAG = "media-fusion-card-editor";
 const DEFAULT = Object.freeze({
-  title:"Media Center", subtitle:"Controlli multimediali", tv_headline:"", tv_name:"", fire_name:"", audio_name:"", light_name:"", tv_on_script:"",
-  show_title:true, show_eyebrow:true, show_subtitle:false, artwork_source:"alexa", compact_mode:false, fire_adb_power:false, theme:"auto",
-  show_samsung:true, show_fire:true, show_alexa:true,
-  show_ambilight:true, show_scripts:true,
-  samsung_entity:"", samsung_remote:"", tv_off_script:"",
-  fire_entity:"", fire_remote:"", alexa_entity:"",
-  ambilight_entity:"", scripts:[]
+  title:"Media Center", subtitle:"Controlli multimediali", tv_headline:"", tv_name:"", streaming_name:"", audio_name:"", light_name:"", tv_on_script:"",
+  show_title:true, show_eyebrow:true, show_subtitle:false, artwork_source:"audio", compact_mode:false, streaming_adb_power:false, theme:"auto",
+  show_tv:true, show_streaming:true, show_audio:true,
+  show_light:true, show_scripts:true,
+  tv_entity:"", tv_remote:"", tv_off_script:"",
+  streaming_entity:"", streaming_remote:"", audio_entity:"",
+  light_entity:"", scripts:[]
 });
 const GROUPS = [
-  ["show_samsung","TV","Sorgenti e telecomando"],
-  ["show_fire","Lettore streaming","Riproduzione e applicazioni"],
-  ["show_alexa","Home Theater","Volume e riproduzione"],
-  ["show_ambilight","Luci LED TV","Luce e luminosità"],
+  ["show_tv","TV","Sorgenti e telecomando"],
+  ["show_streaming","Lettore streaming","Riproduzione e applicazioni"],
+  ["show_audio","Home Theater","Volume e riproduzione"],
+  ["show_light","Luci LED TV","Luce e luminosità"],
   ["show_scripts","Script","Azioni personalizzate"]
 ];
 const KEYSETS = {
@@ -37,11 +37,23 @@ const MEDIA_VOLUME_SET = 4, MEDIA_PREVIOUS_TRACK = 16, MEDIA_NEXT_TRACK = 32, ME
 const supports = (state,feature) => Number.isInteger(state?.attributes?.supported_features) && (state.attributes.supported_features & feature)===feature;
 const shownName = (custom,state,fallback) => short(custom,short(state?.attributes?.friendly_name,fallback)).slice(0,70);
 const stateIcon = (state,fallback) => /^mdi:[a-z0-9-]+$/.test(state?.attributes?.icon||"") ? state.attributes.icon : fallback;
+// Nomi delle opzioni usati nelle versioni precedenti: continuano a essere letti.
+const LEGACY_KEYS = Object.freeze({
+  samsung_entity:"tv_entity", samsung_remote:"tv_remote", fire_entity:"streaming_entity", fire_remote:"streaming_remote",
+  alexa_entity:"audio_entity", ambilight_entity:"light_entity", fire_adb_power:"streaming_adb_power",
+  show_samsung:"show_tv", show_fire:"show_streaming", show_alexa:"show_audio", show_ambilight:"show_light", fire_name:"streaming_name"
+});
 const normalize = config => {
-  const merged = {...DEFAULT,...(config||{})};
+  const source = {...(config||{})};
+  for (const [oldKey,newKey] of Object.entries(LEGACY_KEYS)) {
+    if (Object.hasOwn(source,oldKey)) { if (!Object.hasOwn(source,newKey)) source[newKey]=source[oldKey]; delete source[oldKey]; }
+  }
+  if (source.artwork_source==="alexa") source.artwork_source="audio";
+  if (source.artwork_source==="fire") source.artwork_source="streaming";
+  const merged = {...DEFAULT,...source};
   if (!["auto","light","dark"].includes(merged.theme)) merged.theme="auto";
-  if (!["alexa","fire","none"].includes(merged.artwork_source)) merged.artwork_source="alexa";
-  for(const key of ["tv_headline","tv_name","fire_name","audio_name","light_name"]) merged[key]=typeof merged[key]==="string" ? merged[key].trim().slice(0,70) : "";
+  if (!["audio","streaming","none"].includes(merged.artwork_source)) merged.artwork_source="audio";
+  for(const key of ["tv_headline","tv_name","streaming_name","audio_name","light_name"]) merged[key]=typeof merged[key]==="string" ? merged[key].trim().slice(0,70) : "";
   merged.scripts = Array.isArray(merged.scripts) ? merged.scripts.slice(0,30).map(s=>({name:String(s?.name??"").slice(0,60),entity_id:String(s?.entity_id??"")})) : [];
   return merged;
 };
@@ -164,7 +176,7 @@ class MediaFusionCard extends HTMLElement {
   setConfig(config) {
     if (config?.type && config.type!==`custom:${CARD_TAG}`) throw Error("Tipo card non valido");
     this._config=normalize(config);
-    for (const [field,domain] of [["tv_on_script","script"],["samsung_entity","media_player"],["fire_entity","media_player"],["alexa_entity","media_player"],["ambilight_entity","light"],["samsung_remote","remote"],["fire_remote","remote"],["tv_off_script","script"]]) {
+    for (const [field,domain] of [["tv_on_script","script"],["tv_entity","media_player"],["streaming_entity","media_player"],["audio_entity","media_player"],["light_entity","light"],["tv_remote","remote"],["streaming_remote","remote"],["tv_off_script","script"]]) {
       const v=this._config[field]; if (v && !entityValid(v,domain)) throw Error(`Entità non valida: ${field}`);
     }
     for(const s of this._config.scripts) if(s.entity_id && !entityValid(s.entity_id,"script")) throw Error("Entità script non valida");
@@ -207,7 +219,7 @@ class MediaFusionCard extends HTMLElement {
     this._q("viewTitle").innerHTML=`${escapeHtml(String(c.title||"Media Center").trim().replace(/\.+$/, ""))}<b class="dot">.</b>`;
     this._q("viewSubtitle").hidden=true;
     this._q("sections").classList.toggle("compact-mode",c.compact_mode===true);
-    const visibility={samsung:"show_samsung",fire:"show_fire",alexa:"show_alexa",ambilight:"show_ambilight",scripts:"show_scripts"};
+    const visibility={samsung:"show_tv",fire:"show_streaming",alexa:"show_audio",ambilight:"show_light",scripts:"show_scripts"};
     for(const [section,prop] of Object.entries(visibility)) {
       const el=this.shadowRoot.querySelector(`[data-section="${section}"]`);
       if(el)el.hidden=!c[prop];
@@ -215,12 +227,12 @@ class MediaFusionCard extends HTMLElement {
     this._updateSamsung(); this._updateFire(); this._updateAlexa();this._updateAmbient();this._updateScripts();
   }
   _updateSamsung(){
-    const c=this._config,s=this._state("samsung_entity"),available=validState(s),on=available&&isOn(s);
+    const c=this._config,s=this._state("tv_entity"),available=validState(s),on=available&&isOn(s);
     const canWake=entityValid(c.tv_on_script,"script"),canOff=entityValid(c.tv_off_script,"script");
     const node=this._q("samsung");node.classList.toggle("tv-off",!on);node.classList.toggle("unavailable",!available);
-    const tone=!c.samsung_entity?"":!available?"warn":on?"on":"";
+    const tone=!c.tv_entity?"":!available?"warn":on?"on":"";
     const badge=this._q("tvState");badge.className="badge"+(tone?` ${tone}`:"");
-    badge.querySelector("span").textContent=!c.samsung_entity?"Da configurare":!available?"Non raggiungibile":on?"Accesa":"Spenta";
+    badge.querySelector("span").textContent=!c.tv_entity?"Da configurare":!available?"Non raggiungibile":on?"Accesa":"Spenta";
     this._q("tvCircle").className="ico-circle"+(tone?` ${tone}`:"");
     this._setText("tvName",shownName(c.tv_name,s,"TV"));
     const heading=this._q("tvHero");heading.textContent=c.tv_headline;heading.hidden=!c.tv_headline;
@@ -229,7 +241,7 @@ class MediaFusionCard extends HTMLElement {
     power.className="action-pill power "+(!available?(canWake?"pw-warn":"pw-off"):on?"pw-on":"pw-off");
     power.disabled=(!available&&!canWake)||this._busy.has("tvPower");
     let msg="";
-    if(c.samsung_entity){
+    if(c.tv_entity){
       if(!available)msg=canWake?"TV non raggiungibile: il pulsante power usa lo script di accensione.":"TV non raggiungibile. Configura uno script di accensione nell'editor, scheda Azioni.";
       else if(!on&&!canWake&&!supports(s,MEDIA_TURN_ON))msg="Questa TV non si accende da sola. Configura uno script di accensione nell'editor, scheda Azioni.";
       else if(on&&!canOff&&!supports(s,MEDIA_TURN_OFF))msg="Questa TV non si spegne da sola. Configura uno script di spegnimento nell'editor, scheda Azioni.";
@@ -239,24 +251,24 @@ class MediaFusionCard extends HTMLElement {
     buttons.forEach(el=>el.disabled=!available);
   }
   _updateFire(){
-    const c=this._config,s=this._state("fire_entity"),available=validState(s),on=available&&isOn(s);
-    this._setText("fireName",shownName(c.fire_name,s,"Lettore streaming"));
+    const c=this._config,s=this._state("streaming_entity"),available=validState(s),on=available&&isOn(s);
+    this._setText("fireName",shownName(c.streaming_name,s,"Lettore streaming"));
     this._q("fireIcon").setAttribute("icon",stateIcon(s,"mdi:television-play"));
     const app=short(s?.attributes?.app_name,"");
-    const label=!c.fire_entity?"Da configurare":!available?"Non disponibile":s.state==="playing"?"In riproduzione":s.state==="paused"?"In pausa":on?"Acceso":"Spento";
+    const label=!c.streaming_entity?"Da configurare":!available?"Non disponibile":s.state==="playing"?"In riproduzione":s.state==="paused"?"In pausa":on?"Acceso":"Spento";
     this._setText("fireMeta",available&&on&&app?`${label} · ${app}`:label);
-    this._q("fireCircle").className="ico-circle"+(!c.fire_entity?"":!available?" warn":on?" on":"");
+    this._q("fireCircle").className="ico-circle"+(!c.streaming_entity?"":!available?" warn":on?" on":"");
     const power=this._q("firePower");power.disabled=!available;power.className="icon-btn "+(on?"pw-on":"pw-off");
     power.setAttribute("aria-label",on?"Spegni lettore streaming":"Accendi lettore streaming");
     const play=this._q("firePlay");play.hidden=!on;play.disabled=!available;play.innerHTML=ico(s?.state==="playing"?"pause":"play");
     this.shadowRoot.querySelectorAll('[data-open="fireapps"],[data-open="remote-fire"]').forEach(b=>b.disabled=!available);
   }
   _updateAlexa(){
-    const c=this._config,s=this._state("alexa_entity"),available=validState(s);
+    const c=this._config,s=this._state("audio_entity"),available=validState(s);
     const n=this.shadowRoot.querySelector(".alexa .tag");
     this._setText("audioName",shownName(c.audio_name,s,"Home Theater"));
-    if(n)n.textContent=!c.alexa_entity?"Da configurare":!available?"Non disponibile":"Media player";
-    this._q("audioCircle").className="ico-circle"+(!c.alexa_entity?"":!available?" warn":" on");
+    if(n)n.textContent=!c.audio_entity?"Da configurare":!available?"Non disponibile":"Media player";
+    this._q("audioCircle").className="ico-circle"+(!c.audio_entity?"":!available?" warn":" on");
     const title=this.shadowRoot.querySelector(".track-title");
     if(title)title.textContent=short(s?.attributes?.media_title,"Riproduzione");
     this._setText("trackMeta",!available?"Non disponibile":short(s?.attributes?.media_artist,s?.state==="playing"?"Riproduzione attiva":"Controlli multimediali"));
@@ -269,7 +281,7 @@ class MediaFusionCard extends HTMLElement {
     const presented=this._pendingVolume?.value ?? (hasVol?value:(known?this._lastSetVolume:0));
     const muted=s?.attributes?.is_volume_muted===true;
     this._q("volGroup").hidden=!ctl;this._q("volLine").hidden=!ctl;
-    this._q("noVol").hidden=ctl||!c.alexa_entity;
+    this._q("noVol").hidden=ctl||!c.audio_entity;
     this._setText("noVolTitle",!available?"Dispositivo non disponibile":"Volume non disponibile");
     this._setText("noVolText",!available?"Controlla che il dispositivo sia acceso e raggiungibile da Home Assistant.":"Questa entità non permette di regolare il volume. Scegli un'altra entità.");
     if(!this._editingVolume){this._q("volume").value=String(presented);this._updateVolVisual(known?presented:null,muted);}
@@ -287,7 +299,7 @@ class MediaFusionCard extends HTMLElement {
     const box=this.shadowRoot.querySelector(".alexa .art");if(!box)return;
     const kind=this._config.artwork_source;box.hidden=kind==="none";
     if(kind==="none")return;
-    const entity=kind==="fire"?this._state("fire_entity"):this._state("alexa_entity");
+    const entity=kind==="streaming"?this._state("streaming_entity"):this._state("audio_entity");
     const url=validState(entity)?entity?.attributes?.entity_picture:null;
     const valid=typeof url==="string" && url.startsWith("/") && !url.startsWith("//") && !url.includes("\\") && !/[\x00-\x1f]/.test(url);
     const fallback=box.querySelector("ha-icon");
@@ -307,7 +319,7 @@ class MediaFusionCard extends HTMLElement {
     this._q("volMute").setAttribute("aria-pressed",String(muted));
   }
   _updateAmbient(){
-    const c=this._config,s=this._state("ambilight_entity"),available=validState(s),on=available&&s.state==="on";
+    const c=this._config,s=this._state("light_entity"),available=validState(s),on=available&&s.state==="on";
     this._setText("lightName",shownName(c.light_name,s,"Luci LED TV"));
     this._q("lightIcon").setAttribute("icon",stateIcon(s,"mdi:led-strip-variant"));
     const btn=this._q("ambientSwitch");btn.classList.toggle("on",on);
@@ -315,9 +327,9 @@ class MediaFusionCard extends HTMLElement {
     const canBright=available&&on&&typeof s.attributes?.brightness==="number";
     let bv=canBright?Math.round(s.attributes.brightness/255*100):null;
     const pb=this._pendingBright;if(pb&&(Date.now()>pb.until||!canBright))this._pendingBright=null;else if(pb&&canBright&&Math.abs(bv-pb.value)<=2)this._pendingBright=null;else if(pb)bv=pb.value;
-    this._setText("ambientLabel",!c.ambilight_entity?"Da configurare":!available?"Non disponibile":on?(bv!==null?`Illuminazione · Accesa ${bv}%`:"Illuminazione · Accesa"):"Illuminazione · Spenta");
+    this._setText("ambientLabel",!c.light_entity?"Da configurare":!available?"Non disponibile":on?(bv!==null?`Illuminazione · Accesa ${bv}%`:"Illuminazione · Accesa"):"Illuminazione · Spenta");
     const circle=this._q("lightCircle");
-    circle.className="ico-circle"+(!c.ambilight_entity?"":!available?" warn":on?" on":"");
+    circle.className="ico-circle"+(!c.light_entity?"":!available?" warn":on?" on":"");
     const rgb=s?.attributes?.rgb_color;
     const okRgb=on&&Array.isArray(rgb)&&rgb.length===3&&rgb.every(x=>Number.isInteger(x)&&x>=0&&x<=255);
     circle.style.background=okRgb?`rgb(${rgb[0]},${rgb[1]},${rgb[2]})`:"";
@@ -352,28 +364,28 @@ class MediaFusionCard extends HTMLElement {
     }
     const id=el.id;
     if(id==="tvPower"){
-      const s=this._state("samsung_entity");
+      const s=this._state("tv_entity");
       if(isOn(s)) {
         if(entityValid(this._config.tv_off_script,"script"))this._send("script","turn_on",this._config.tv_off_script,{},"tvPower");
-        else if(supports(s,MEDIA_TURN_OFF))this._send("media_player","turn_off",this._config.samsung_entity,{},"tvPower");
+        else if(supports(s,MEDIA_TURN_OFF))this._send("media_player","turn_off",this._config.tv_entity,{},"tvPower");
         else this._toast("Configura uno script di spegnimento TV in Azioni.");
       } else {
         if(entityValid(this._config.tv_on_script,"script"))this._send("script","turn_on",this._config.tv_on_script,{},"tvPower");
-        else if(supports(s,MEDIA_TURN_ON))this._send("media_player","turn_on",this._config.samsung_entity,{},"tvPower");
+        else if(supports(s,MEDIA_TURN_ON))this._send("media_player","turn_on",this._config.tv_entity,{},"tvPower");
         else this._toast("La TV non supporta l’accensione diretta. Configura uno script di accensione TV in Azioni.");
       }
     } else if(id==="firePower")this._fireToggle();
-    else if(id==="firePlay") this._togglePlay("fire_entity");
-    else if(id==="alexaPlay") this._togglePlay("alexa_entity");
-    else if(id==="alexaPrev") this._send("media_player","media_previous_track",this._config.alexa_entity,{},"alexa-prev");
-    else if(id==="alexaNext") this._send("media_player","media_next_track",this._config.alexa_entity,{},"alexa-next");
+    else if(id==="firePlay") this._togglePlay("streaming_entity");
+    else if(id==="alexaPlay") this._togglePlay("audio_entity");
+    else if(id==="alexaPrev") this._send("media_player","media_previous_track",this._config.audio_entity,{},"alexa-prev");
+    else if(id==="alexaNext") this._send("media_player","media_next_track",this._config.audio_entity,{},"alexa-next");
     else if(id==="volMinus"||id==="volPlus"){
-      const s=this._state("alexa_entity");const v=s?.attributes?.volume_level;
+      const s=this._state("audio_entity");const v=s?.attributes?.volume_level;
       if(typeof v==="number")this._setVolume((this._pendingVolume?.value??Math.round(v*100))+(id==="volPlus"?5:-5));
     }else if(id==="volMute"){
-      const s=this._state("alexa_entity");this._send("media_player","volume_mute",this._config.alexa_entity,{is_volume_muted:!s?.attributes?.is_volume_muted},"mute");
+      const s=this._state("audio_entity");this._send("media_player","volume_mute",this._config.audio_entity,{is_volume_muted:!s?.attributes?.is_volume_muted},"mute");
     }else if(id==="ambientSwitch"){
-      const s=this._state("ambilight_entity");this._send("light",s?.state==="on"?"turn_off":"turn_on",this._config.ambilight_entity,{},"light");
+      const s=this._state("light_entity");this._send("light",s?.state==="on"?"turn_off":"turn_on",this._config.light_entity,{},"light");
     }else if(el.dataset.script!==undefined){
       const arr=this._config.scripts.filter(s=>entityValid(s.entity_id,"script"));const s=arr[Number(el.dataset.script)];
       if(s)this._send("script","turn_on",s.entity_id,{},`script:${s.entity_id}`);
@@ -392,14 +404,14 @@ class MediaFusionCard extends HTMLElement {
       this._liveBrightness(Number(target.value),true);
     }
   }
-  _volKey(){return `media-fusion-card:volume:${this._config?.alexa_entity||""}`;}
+  _volKey(){return `media-fusion-card:volume:${this._config?.audio_entity||""}`;}
   _loadVolume(){try{const v=Number(localStorage.getItem(this._volKey()));return localStorage.getItem(this._volKey())!==null&&Number.isFinite(v)?clamp(Math.round(v),0,100):NaN;}catch(e){return NaN;}}
   _saveVolume(n){try{localStorage.setItem(this._volKey(),String(n));}catch(e){}}
   _liveBrightness(v,final){
     const n=Math.round(clamp(v,1,100));
     this._pendingBright={value:n,until:Date.now()+3500};
     clearTimeout(this._brightTimer);
-    const go=()=>{this._lastBrightSend=Date.now();this._send("light","turn_on",this._config.ambilight_entity,{brightness_pct:this._pendingBright.value});};
+    const go=()=>{this._lastBrightSend=Date.now();this._send("light","turn_on",this._config.light_entity,{brightness_pct:this._pendingBright.value});};
     const wait=final?0:Math.max(0,150-(Date.now()-(this._lastBrightSend||0)));
     if(wait===0)go();else this._brightTimer=setTimeout(go,wait);
   }
@@ -407,7 +419,7 @@ class MediaFusionCard extends HTMLElement {
     const n=Math.round(clamp(pct,0,100));
     this._pendingVolume={value:n,until:Date.now()+3500};this._lastSetVolume=n;this._saveVolume(n);
     this._updateVolVisual(n,false);
-    this._send("media_player","volume_set",this._config.alexa_entity,{volume_level:n/100},"alexa-volume");
+    this._send("media_player","volume_set",this._config.audio_entity,{volume_level:n/100},"alexa-volume");
   }
   _togglePlay(field){
     const s=this._state(field); if(!validState(s))return;
@@ -481,7 +493,7 @@ class MediaFusionCard extends HTMLElement {
     return `<button class="dialog-item ${selected?"active":""}" data-source-kind="${kind}" data-source="${escapeHtml(name)}" style="width:100%;text-align:left;cursor:pointer"><div><span>${escapeHtml(name)}</span><small>${kind==="samsung"?"Sorgente TV":"Applicazione / sorgente"}</small></div>${ico(selected?"check":"chevron")}</button>`;
   }
   _sources(kind){
-    const s=this._state(kind==="samsung"?"samsung_entity":"fire_entity");
+    const s=this._state(kind==="samsung"?"tv_entity":"streaming_entity");
     const list=Array.isArray(s?.attributes?.source_list)?s.attributes.source_list.filter(x=>typeof x==="string"):[];
     const available=validState(s),supported=supports(s,MEDIA_SELECT_SOURCE);
     const html=!available?`<p class="dialog-note">Dispositivo non disponibile.</p>`:
@@ -491,28 +503,28 @@ class MediaFusionCard extends HTMLElement {
     this._open(kind==="samsung"?"Sorgenti TV":"Sorgenti streaming", "SORGENTI DISPONIBILI",html);
   }
   async _fireCommand(on){
-    const s=this._state("fire_entity"),rid=this._config.fire_remote;
-    if(this._config.fire_adb_power===true)return this._send("androidtv","adb_command",this._config.fire_entity,{command:on?"WAKEUP":"SLEEP"},`fire-adb:${on?"on":"off"}`,"media_player");
-    if(supports(s,on?MEDIA_TURN_ON:MEDIA_TURN_OFF))return this._send("media_player",on?"turn_on":"turn_off",this._config.fire_entity,{},`fire:${on?"on":"off"}`);
+    const s=this._state("streaming_entity"),rid=this._config.streaming_remote;
+    if(this._config.streaming_adb_power===true)return this._send("androidtv","adb_command",this._config.streaming_entity,{command:on?"WAKEUP":"SLEEP"},`fire-adb:${on?"on":"off"}`,"media_player");
+    if(supports(s,on?MEDIA_TURN_ON:MEDIA_TURN_OFF))return this._send("media_player",on?"turn_on":"turn_off",this._config.streaming_entity,{},`fire:${on?"on":"off"}`);
     if(entityValid(rid,"remote") && validState(this._stateById(rid)))return this._send("remote","send_command",rid,{command:on?"WAKEUP":"SLEEP"},`fire-remote:${on?"on":"off"}`);
     return null;
   }
   async _fireToggle(){
-    const s=this._state("fire_entity");
+    const s=this._state("streaming_entity");
     if(!validState(s)){this._toast("Lettore streaming non disponibile");return;}
     const result=await this._fireCommand(!isOn(s));
     if(result===null)this._toast("Il lettore non espone il comando richiesto. Verifica le funzioni del dispositivo o configura il telecomando remote.");
   }
   _firePowerMenu(){
-    if(!validState(this._state("fire_entity"))){this._toast("Lettore streaming non disponibile");return;}
+    if(!validState(this._state("streaming_entity"))){this._toast("Lettore streaming non disponibile");return;}
     this._open("Alimentazione lettore","COMANDI DI ALIMENTAZIONE",`<div class="power-menu"><button type="button" data-fire-action="on">${ico("power")} Accendi</button><button type="button" data-fire-action="off">${ico("power")} Spegni</button></div>`);
   }
-  _remoteId(kind){return this._config[kind==="samsung"?"samsung_remote":"fire_remote"];}
+  _remoteId(kind){return this._config[kind==="samsung"?"tv_remote":"streaming_remote"];}
   _remote(kind){this._modalMode=kind;this._open("Telecomando","CONTROLLO REMOTO",this._remoteHtml());}
   _remoteHtml(){
     const kind=this._modalMode,ks=KEYSETS[kind],id=this._remoteId(kind);
     const remoteAvailable=entityValid(id,"remote") && validState(this._stateById(id));
-    const adbAvailable=kind==="fire" && validState(this._state("fire_entity"));
+    const adbAvailable=kind==="fire" && validState(this._state("streaming_entity"));
     const canUse=remoteAvailable||adbAvailable;
     const disabled=canUse?"":"disabled";
     const press=(label,key,ic)=>`<button ${disabled} data-remote-key="${escapeHtml(key)}">${ico(ic)} ${label}</button>`;
@@ -531,11 +543,11 @@ class MediaFusionCard extends HTMLElement {
     if(event.target===this._p("overlay")||event.target.closest("#closeDialog")){this._close();return;}
     const el=event.target.closest("button");if(!el||el.disabled)return;
     if(el.dataset.fireAction){
-      const s=this._state("fire_entity"),on=el.dataset.fireAction==="on";
-      const rid=this._config.fire_remote;
+      const s=this._state("streaming_entity"),on=el.dataset.fireAction==="on";
+      const rid=this._config.streaming_remote;
       let result=false;
-      if(this._config.fire_adb_power===true)result=await this._send("androidtv","adb_command",this._config.fire_entity,{command:on?"WAKEUP":"SLEEP"},`fire-adb:${on?"on":"off"}`,"media_player");
-      else if(supports(s,on?MEDIA_TURN_ON:MEDIA_TURN_OFF))result=await this._send("media_player",on?"turn_on":"turn_off",this._config.fire_entity,{},`fire:${on?"on":"off"}`);
+      if(this._config.streaming_adb_power===true)result=await this._send("androidtv","adb_command",this._config.streaming_entity,{command:on?"WAKEUP":"SLEEP"},`fire-adb:${on?"on":"off"}`,"media_player");
+      else if(supports(s,on?MEDIA_TURN_ON:MEDIA_TURN_OFF))result=await this._send("media_player",on?"turn_on":"turn_off",this._config.streaming_entity,{},`fire:${on?"on":"off"}`);
       else if(entityValid(rid,"remote") && validState(this._stateById(rid)))result=await this._send("remote","send_command",rid,{command:on?"WAKEUP":"SLEEP"},`fire-remote:${on?"on":"off"}`);
       else {const e=this._p("dialogError");if(e){e.textContent="Il lettore non espone il comando richiesto. Verifica le funzioni del dispositivo o configura il telecomando remote.";e.hidden=false;}}
       if(result)this._close();
@@ -547,14 +559,14 @@ class MediaFusionCard extends HTMLElement {
       const allowed=Object.values(KEYSETS[this._modalMode]);
       if(!allowed.includes(el.dataset.remoteKey))return;
       if(entityValid(rid,"remote") && validState(this._stateById(rid)))this._send("remote","send_command",rid,{command:el.dataset.remoteKey},`remote:${this._modalMode}:${el.dataset.remoteKey}`);
-      else if(this._modalMode==="fire")this._send("androidtv","adb_command",this._config.fire_entity,{command:el.dataset.remoteKey},`adb:${el.dataset.remoteKey}`,"media_player");
+      else if(this._modalMode==="fire")this._send("androidtv","adb_command",this._config.streaming_entity,{command:el.dataset.remoteKey},`adb:${el.dataset.remoteKey}`,"media_player");
       return;
     }
     if(el.dataset.source){
       const kind=el.dataset.sourceKind;
-      const s=this._state(kind==="samsung"?"samsung_entity":"fire_entity");
+      const s=this._state(kind==="samsung"?"tv_entity":"streaming_entity");
       if(!supports(s,MEDIA_SELECT_SOURCE) || !Array.isArray(s?.attributes?.source_list) || !s.attributes.source_list.includes(el.dataset.source))return;
-      const result=await this._send("media_player","select_source",this._config[kind==="samsung"?"samsung_entity":"fire_entity"],{source:el.dataset.source},`source:${kind}`);
+      const result=await this._send("media_player","select_source",this._config[kind==="samsung"?"tv_entity":"streaming_entity"],{source:el.dataset.source},`source:${kind}`);
       if(result)this._close();
     }
   }
@@ -612,25 +624,25 @@ class MediaFusionCardEditor extends HTMLElement {
           ${sw("show_title","Mostra titolo principale","Mostra o nascondi Media Center e il punto verde")}
           ${c.show_title?field("title","Titolo personalizzato","Media Center"):""}
           ${sw("compact_mode","Layout compatto","Riduce ingombri e spaziature senza rimuovere controlli")}
-          <div class="field"><label for="ed-artwork_source">Copertina multimediale</label><select id="ed-artwork_source" data-artwork><option value="alexa" ${c.artwork_source==="alexa"?"selected":""}>Home Theater (se disponibile)</option><option value="fire" ${c.artwork_source==="fire"?"selected":""}>Lettore streaming (se disponibile)</option><option value="none" ${c.artwork_source==="none"?"selected":""}>Non mostrare</option></select></div>
+          <div class="field"><label for="ed-artwork_source">Copertina multimediale</label><select id="ed-artwork_source" data-artwork><option value="audio" ${c.artwork_source==="audio"?"selected":""}>Home Theater (se disponibile)</option><option value="streaming" ${c.artwork_source==="streaming"?"selected":""}>Lettore streaming (se disponibile)</option><option value="none" ${c.artwork_source==="none"?"selected":""}>Non mostrare</option></select></div>
           </div><div class="setting-group"><div class="group-title">Nomi e testi (facoltativi)</div>
           ${field("tv_headline","Testo principale TV (vuoto per nasconderlo)","Vuoto = nascosto")}
           ${field("tv_name","Nome TV (vuoto = nome entità)","TV")}
-          ${field("fire_name","Nome lettore streaming (vuoto = nome entità)","Lettore streaming")}
+          ${field("streaming_name","Nome lettore streaming (vuoto = nome entità)","Lettore streaming")}
           ${field("audio_name","Nome Home Theater (vuoto = nome entità)","Home Theater")}
           ${field("light_name","Nome luci LED TV (vuoto = nome entità)","Luci LED TV")}
           </div><div class="setting-group"><div class="group-title">Tema</div><div class="field"><label for="ed-theme">Tema</label><select id="ed-theme" data-theme><option value="auto" ${c.theme==="auto"?"selected":""}>Automatico (Home Assistant)</option><option value="light" ${c.theme==="light"?"selected":""}>Light</option><option value="dark" ${c.theme==="dark"?"selected":""}>Graphite Dark</option></select></div></div></div>
       `:`
         <div class="settings-body"><div class="setting-group"><div class="group-title">Entità Home Assistant</div>
-          ${ent("samsung_entity","TV · Media player","media_player")}
+          ${ent("tv_entity","TV · Media player","media_player")}
           ${ent("tv_on_script","TV · Script accensione (facoltativo)","script")}
-          ${ent("samsung_remote","TV · Remote (opzionale)","remote")}
+          ${ent("tv_remote","TV · Remote (opzionale)","remote")}
           ${ent("tv_off_script","TV · Script spegnimento (facoltativo)","script")}
-          ${ent("fire_entity","Lettore streaming · Media player","media_player")}
-          ${ent("fire_remote","Lettore streaming · Remote (facoltativo)","remote")}
-          ${sw("fire_adb_power","Accensione tramite ADB (Fire TV)","Solo per dispositivi Android Debug Bridge: usa WAKEUP e SLEEP.")}
-          ${ent("alexa_entity","Home Theater · Media player","media_player")}
-          ${ent("ambilight_entity","Luci LED TV · Luce","light")}
+          ${ent("streaming_entity","Lettore streaming · Media player","media_player")}
+          ${ent("streaming_remote","Lettore streaming · Remote (facoltativo)","remote")}
+          ${sw("streaming_adb_power","Accensione tramite ADB (Fire TV)","Solo per dispositivi Android Debug Bridge: usa WAKEUP e SLEEP.")}
+          ${ent("audio_entity","Home Theater · Media player","media_player")}
+          ${ent("light_entity","Luci LED TV · Luce","light")}
           </div>
           <div class="setting-group"><div class="group-title">Script personalizzati</div>
           ${c.scripts.map((s,i)=>`<div class="script-row" data-script-edit="${i}">
@@ -676,10 +688,10 @@ class MediaFusionCardEditor extends HTMLElement {
     const c=this._config,states=this._hass?.states;
     const yn=v=>`<span class="${v?"y":"n"}">${v?"Sì":"No"}</span>`;
     const items=[
-      ["TV",c.samsung_entity,[["Accensione",MEDIA_TURN_ON],["Spegnimento",MEDIA_TURN_OFF],["Sorgenti",MEDIA_SELECT_SOURCE]]],
-      ["Home Theater",c.alexa_entity,[["Livello volume","level"],["Volume",4],["Mute",8],["Precedente",MEDIA_PREVIOUS_TRACK],["Successiva",MEDIA_NEXT_TRACK]]],
-      ["Lettore streaming",c.fire_entity,[["Accensione",MEDIA_TURN_ON],["Spegnimento",MEDIA_TURN_OFF],["Sorgenti",MEDIA_SELECT_SOURCE]]],
-      ["Luci LED TV",c.ambilight_entity,[]]
+      ["TV",c.tv_entity,[["Accensione",MEDIA_TURN_ON],["Spegnimento",MEDIA_TURN_OFF],["Sorgenti",MEDIA_SELECT_SOURCE]]],
+      ["Home Theater",c.audio_entity,[["Livello volume","level"],["Volume",4],["Mute",8],["Precedente",MEDIA_PREVIOUS_TRACK],["Successiva",MEDIA_NEXT_TRACK]]],
+      ["Lettore streaming",c.streaming_entity,[["Accensione",MEDIA_TURN_ON],["Spegnimento",MEDIA_TURN_OFF],["Sorgenti",MEDIA_SELECT_SOURCE]]],
+      ["Luci LED TV",c.light_entity,[]]
     ];
     const rows=items.map(([name,id,feats])=>{
       const st=id&&states?states[id]:undefined;
@@ -699,7 +711,7 @@ class MediaFusionCardEditor extends HTMLElement {
   _onButton(btn){
     if(btn.hasAttribute("data-clear-entity")){
       const key=btn.dataset.clearEntity;
-      if(!Object.hasOwn(DEFAULT,key) || !["samsung_entity","samsung_remote","tv_on_script","tv_off_script","fire_entity","fire_remote","alexa_entity","ambilight_entity"].includes(key))return;
+      if(!Object.hasOwn(DEFAULT,key) || !["tv_entity","tv_remote","tv_on_script","tv_off_script","streaming_entity","streaming_remote","audio_entity","light_entity"].includes(key))return;
       this._set(key,"");this._render();return;
     }
     if(btn.hasAttribute("data-clear-script")){
@@ -712,7 +724,7 @@ class MediaFusionCardEditor extends HTMLElement {
     if(btn.dataset.toggle){const k=btn.dataset.toggle;this._set(k,!this._config[k]);btn.classList.toggle("on",this._config[k]);btn.setAttribute("aria-checked",String(this._config[k]));return;}
     if(btn.dataset.preset){
       const mode=btn.dataset.preset;
-      const change={};for(const [k] of GROUPS)change[k]=mode==="all"||(mode==="tv"&&k==="show_samsung")||(mode==="alexa"&&k==="show_alexa");
+      const change={};for(const [k] of GROUPS)change[k]=mode==="all"||(mode==="tv"&&k==="show_tv")||(mode==="alexa"&&k==="show_audio");
       this._change(change);this._render();return;
     }
     if(btn.hasAttribute("data-add-script")){
