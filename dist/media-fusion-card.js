@@ -1,7 +1,7 @@
 /*
- * Media Fusion Card — development build for local Home Assistant testing (not a GitHub release)
+ * Media Fusion Card
  * Copyright (c) 2026 luigi-regolo
- * Derived from the user-approved Edera HTML prototype.
+ * Licensed under GPL-3.0-only.
  * No remote analytics, external libraries, paid services or credentials.
  */
 (() => {
