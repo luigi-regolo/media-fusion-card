@@ -6,741 +6,1071 @@
  */
 (() => {
 "use strict";
+const VERSION = "1.3";
 const CARD_TAG = "media-fusion-card";
 const EDITOR_TAG = "media-fusion-card-editor";
+const MODULES = ["tv", "streaming", "light", "scripts"];
+const MOD_FLAG = { tv: "show_tv", streaming: "show_streaming", light: "show_light", scripts: "show_scripts" };
 const DEFAULT = Object.freeze({
-  title:"Media Center", subtitle:"Controlli multimediali", tv_headline:"", tv_name:"", streaming_name:"", audio_name:"", light_name:"", tv_on_script:"",
-  show_title:true, show_eyebrow:true, show_subtitle:false, artwork_source:"audio", compact_mode:false, streaming_adb_power:false, theme:"auto",
-  show_tv:true, show_streaming:true, show_audio:true,
-  show_light:true, show_scripts:true,
-  tv_entity:"", tv_remote:"", tv_off_script:"",
-  streaming_entity:"", streaming_remote:"", audio_entity:"",
-  light_entity:"", scripts:[]
+  eyebrow: "Media Fusion Card", title: "Media Center", show_eyebrow: true, show_title: true,
+  show_audio: true, show_progress: true, artwork_source: "audio",
+  show_tv: true, show_streaming: true, show_light: true, show_scripts: true,
+  order: MODULES, highlight_on: true, show_apps: true, apps: [], remote_target: "auto",
+  theme: "auto", language: "auto",
+  tv_entity: "", tv_remote: "", tv_on_script: "", tv_off_script: "", tv_name: "",
+  streaming_entity: "", streaming_remote: "", streaming_adb_power: false, streaming_name: "",
+  audio_entity: "", audio_name: "", light_entity: "", light_name: "", scripts: []
 });
-const GROUPS = [
-  ["show_tv","TV","Sorgenti e telecomando"],
-  ["show_streaming","Lettore streaming","Riproduzione e applicazioni"],
-  ["show_audio","Home Theater","Volume e riproduzione"],
-  ["show_light","Luci LED TV","Luce e luminosità"],
-  ["show_scripts","Script","Azioni personalizzate"]
-];
-const KEYSETS = {
-  samsung: {up:"KEY_UP",down:"KEY_DOWN",left:"KEY_LEFT",right:"KEY_RIGHT",ok:"KEY_ENTER",back:"KEY_RETURN",home:"KEY_HOME",power:"KEY_POWER",mute:"KEY_MUTE",volup:"KEY_VOLUP",voldown:"KEY_VOLDOWN"},
-  fire: {up:"UP",down:"DOWN",left:"LEFT",right:"RIGHT",ok:"CENTER",back:"BACK",home:"HOME",power:"POWER",mute:"MUTE",volup:"VOLUME_UP",voldown:"VOLUME_DOWN"}
-};
-const entityValid = (id,domain) => typeof id === "string" && id.startsWith(domain+".") && /^[a-z0-9_]+$/.test(id.slice(domain.length+1));
-const escapeHtml = v => String(v ?? "").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"})[c]);
-const clamp = (v,min,max) => Math.min(max,Math.max(min,Number(v)));
-const ICON_MAP = Object.freeze({"tv":"television","power":"power","volume":"volume-high","mute":"volume-off","remote":"remote-tv","chevron":"chevron-right","arrow":"arrow-right","list":"format-list-bulleted","fire":"fire","play":"play","pause":"pause","prev":"skip-previous","next":"skip-next","minus":"minus","plus":"plus","sun":"white-balance-sunny","moon":"weather-night","glow":"lightbulb-on-outline","zap":"lightning-bolt-outline","spark":"auto-fix","home":"home","back":"arrow-left","up":"chevron-up","down":"chevron-down","left":"chevron-left","right":"chevron-right","close":"close","check":"check","settings":"cog-outline","info":"information-outline","loading":"loading"});
-const ico = (id,cls="sm") => `<ha-icon class="ico ${cls}" icon="mdi:${ICON_MAP[id]||"information-outline"}" aria-hidden="true"></ha-icon>`;
-const MEDIA_VOLUME_SET = 4, MEDIA_PREVIOUS_TRACK = 16, MEDIA_NEXT_TRACK = 32, MEDIA_TURN_ON = 128, MEDIA_TURN_OFF = 256, MEDIA_SELECT_SOURCE = 2048;
-const supports = (state,feature) => Number.isInteger(state?.attributes?.supported_features) && (state.attributes.supported_features & feature)===feature;
-const shownName = (custom,state,fallback) => short(custom,short(state?.attributes?.friendly_name,fallback)).slice(0,70);
-const stateIcon = (state,fallback) => /^mdi:[a-z0-9-]+$/.test(state?.attributes?.icon||"") ? state.attributes.icon : fallback;
-// Nomi delle opzioni usati nelle versioni precedenti: continuano a essere letti.
+// Option names used by older versions: still read, then rewritten with the current names.
 const LEGACY_KEYS = Object.freeze({
-  samsung_entity:"tv_entity", samsung_remote:"tv_remote", fire_entity:"streaming_entity", fire_remote:"streaming_remote",
-  alexa_entity:"audio_entity", ambilight_entity:"light_entity", fire_adb_power:"streaming_adb_power",
-  show_samsung:"show_tv", show_fire:"show_streaming", show_alexa:"show_audio", show_ambilight:"show_light", fire_name:"streaming_name"
+  samsung_entity: "tv_entity", samsung_remote: "tv_remote", fire_entity: "streaming_entity", fire_remote: "streaming_remote",
+  alexa_entity: "audio_entity", ambilight_entity: "light_entity", fire_adb_power: "streaming_adb_power",
+  show_samsung: "show_tv", show_fire: "show_streaming", show_alexa: "show_audio", show_ambilight: "show_light", fire_name: "streaming_name"
 });
-const normalize = config => {
-  const source = {...(config||{})};
-  for (const [oldKey,newKey] of Object.entries(LEGACY_KEYS)) {
-    if (Object.hasOwn(source,oldKey)) { if (!Object.hasOwn(source,newKey)) source[newKey]=source[oldKey]; delete source[oldKey]; }
-  }
-  if (source.artwork_source==="alexa") source.artwork_source="audio";
-  if (source.artwork_source==="fire") source.artwork_source="streaming";
-  const merged = {...DEFAULT,...source};
-  if (!["auto","light","dark"].includes(merged.theme)) merged.theme="auto";
-  if (!["audio","streaming","none"].includes(merged.artwork_source)) merged.artwork_source="audio";
-  for(const key of ["tv_headline","tv_name","streaming_name","audio_name","light_name"]) merged[key]=typeof merged[key]==="string" ? merged[key].trim().slice(0,70) : "";
-  merged.scripts = Array.isArray(merged.scripts) ? merged.scripts.slice(0,30).map(s=>({name:String(s?.name??"").slice(0,60),entity_id:String(s?.entity_id??"")})) : [];
-  return merged;
-};
-const validState = s => !!s && !["unavailable","unknown"].includes(s.state);
-const isOn = s => !!s && !["off","standby","unavailable","unknown"].includes(s.state);
-const short = (s, fallback) => (typeof s === "string" && s.trim() ? s.trim() : fallback);
+// Remote keys. TV: Samsung key names (remote.send_command). Player: Android Debug Bridge key names.
+const TV_KEYS = Object.freeze({ up: "KEY_UP", down: "KEY_DOWN", left: "KEY_LEFT", right: "KEY_RIGHT", ok: "KEY_ENTER", back: "KEY_RETURN", home: "KEY_HOME", menu: "KEY_MENU", rew: "KEY_REWIND", ff: "KEY_FF", volup: "KEY_VOLUP", voldown: "KEY_VOLDOWN", mute: "KEY_MUTE", chup: "KEY_CHUP", chdown: "KEY_CHDOWN" });
+const ADB_KEYS = Object.freeze({ up: "UP", down: "DOWN", left: "LEFT", right: "RIGHT", ok: "CENTER", back: "BACK", home: "HOME", menu: "MENU", rew: "REWIND", ff: "FAST_FORWARD" });
+const NAV = ["up", "down", "left", "right", "ok", "back", "home", "menu", "rew", "ff"];
+const F = { VOLUME_SET: 4, VOLUME_MUTE: 8, PREVIOUS: 16, NEXT: 32, TURN_ON: 128, TURN_OFF: 256, VOLUME_STEP: 1024, SELECT_SOURCE: 2048, PLAY: 16384 };
+const LANGS = [["it", "Italiano"], ["en", "English"], ["de", "Deutsch"], ["fr", "Français"]];
 
-const BASE_CSS = "\n:host{color-scheme:light;--bg:#edf1ed;--page:#f7f9f7;--panel:#fff;--panel2:#f5f7f5;--ink:#1c2923;--muted:#79847e;--line:#e5eae5;--emerald:#0a7156;--strong:#138252;--soft:#e9f7ef;--glow:rgba(20,161,99,.18);--shadow:0 18px 45px rgba(17,42,30,.055);--ring:#e7eee9;--switch:#cbd4cd;--greenText:#116b45}\n:host([data-dark]){color-scheme:dark;--bg:#151a19;--page:#1d2321;--panel:#252e2b;--panel2:#303a35;--ink:#f0f5f1;--muted:#a2afa8;--line:#3c4841;--emerald:#39c68d;--strong:#59dba4;--soft:#234538;--glow:rgba(47,195,131,.17);--shadow:0 17px 40px rgba(0,0,0,.17);--ring:#3b4740;--switch:#58665d;--greenText:#83ecb7}\n*{box-sizing:border-box}[hidden]{display:none!important}html{font-family:var(--ha-font-family-body,Roboto,Arial,sans-serif)}body{margin:0;color:var(--ink);background:radial-gradient(ellipse at 10% 0%,var(--glow),transparent 35%),var(--bg);min-height:100vh;transition:background .25s,color .25s}button,input{font:inherit}button{cursor:pointer}button:focus-visible,input:focus-visible{outline:3px solid rgba(48,191,125,.55);outline-offset:2px}button:disabled{opacity:.45;cursor:not-allowed}.ico{width:19px;height:19px;--mdc-icon-size:19px;display:inline-flex;align-items:center;justify-content:center;vertical-align:middle;flex:none}.ico.sm{width:16px;height:16px;--mdc-icon-size:16px}.ico.lg{width:24px;height:24px;--mdc-icon-size:24px}.container{width:min(1190px,calc(100% - 40px));margin:0 auto;padding-bottom:48px}\n.top{height:88px;display:flex;align-items:center;justify-content:space-between;gap:18px;border-bottom:1px solid rgba(120,142,128,.14)}.brand{display:flex;align-items:center;gap:12px}.mark{width:42px;height:42px;border-radius:15px;display:grid;place-items:center;background:var(--emerald);color:white;box-shadow:0 8px 20px var(--glow)}.brand-text{font-size:13px;font-weight:780;letter-spacing:.13em}.brand-text span{display:block;font-size:11px;margin-top:4px;color:var(--muted);letter-spacing:.04em;font-weight:500}.top-right{display:flex;align-items:center;gap:10px}.status-chip{font-size:11px;font-weight:700;border:1px solid var(--line);border-radius:30px;padding:10px 13px;color:var(--muted);white-space:nowrap}.status-chip::before{content:'';display:inline-block;background:#e6ad43;width:6px;height:6px;border-radius:50%;margin-right:8px}.mode-btn{width:39px;height:39px;border-radius:12px;border:1px solid var(--line);background:var(--panel);color:var(--ink);display:grid;place-items:center}\n.heading{padding:38px 0 26px}.eyebrow{color:var(--emerald);font-weight:800;letter-spacing:.16em;font-size:10px}.heading h1{font-size:clamp(25px,3.4vw,41px);letter-spacing:-.055em;font-weight:720;line-height:1.17;margin:12px 0 10px}.heading p{font-size:14px;max-width:660px;line-height:1.7;color:var(--muted);margin:0}.workspace{display:grid;grid-template-columns:minmax(0,1.58fr) minmax(300px,.9fr);gap:25px;align-items:start}.preview-label{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:13px}.overline{font-size:10px;letter-spacing:.16em;font-weight:790;color:var(--muted)}.tiny{font-size:11px;color:var(--muted)}.preview-shell{border:1px solid var(--line);border-radius:26px;background:var(--page);padding:19px;box-shadow:var(--shadow)}\n.media-card{border-radius:23px;background:var(--panel);padding:21px;border:1px solid var(--line);box-shadow:0 13px 32px rgba(0,0,0,.035);min-width:0}.media-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:20px}.head-left{display:flex;align-items:center;gap:12px;min-width:0}.head-icon{width:43px;height:43px;display:grid;place-items:center;border-radius:15px;background:var(--soft);color:var(--emerald);flex:none}.micro{font-size:10px;letter-spacing:1.7px;font-weight:750;color:var(--muted);margin-bottom:7px;text-transform:uppercase}.media-head h2{margin:0;font-size:25px;font-weight:780;letter-spacing:-.7px;line-height:1.14;white-space:normal;overflow-wrap:anywhere}.media-head h2 .dot{color:var(--emerald)}.subhead{font-size:11px;color:var(--muted);margin:6px 0 0}.circle-btn{width:37px;height:37px;border-radius:12px;background:var(--panel2);color:var(--ink);border:1px solid var(--line);display:grid;place-items:center;flex:none;transition:transform .18s}.circle-btn:hover,.action-pill:hover,.icon-btn:hover{transform:translateY(-1px)}\n.sections{display:grid;gap:11px}.device{border-radius:17px;border:1px solid var(--line);overflow:hidden;min-width:0}.samsung{padding:18px;color:#f8faf8;background:radial-gradient(circle at 75% 42%,rgba(52,185,140,.21),transparent 34%),linear-gradient(125deg,#202e2b,#17211e 78%);border-color:#263a31;position:relative}.samsung-upper{display:flex;align-items:center;justify-content:space-between;gap:8px}.device-id{display:flex;align-items:center;gap:9px;font-size:12px;font-weight:760;letter-spacing:.02em}.device-id .ico{opacity:.8}.status{display:inline-flex;align-items:center;gap:6px;font-size:10px;color:#b0c2b8;white-space:nowrap}.status i{width:6px;height:6px;background:#4fe3a2;display:block;border-radius:50%}.status.off i{background:#86928c}.tv-content{display:flex;align-items:center;justify-content:space-between;min-height:114px;gap:14px}.tv-info{min-width:0}.tv-info h3{font-size:23px;letter-spacing:-.05em;margin:0 0 8px;font-weight:660}.tv-info p{font-size:11px;color:#b5c7bd;margin:0}.screen{position:relative;width:146px;height:82px;border:5px solid #3d4d45;border-bottom-width:9px;border-radius:9px;background:radial-gradient(ellipse at 75% 25%,#4bb68e,transparent 45%),linear-gradient(155deg,#426e68,#18352b 55%,#121d24);transform:perspective(440px) rotateY(-11deg);box-shadow:0 10px 35px rgba(0,0,0,.25),0 0 20px rgba(58,195,123,.08);flex:none}.screen:after{content:'';position:absolute;bottom:-16px;width:42px;height:7px;background:#4a5b50;left:calc(50% - 21px);clip-path:polygon(40% 0,60% 0,70% 100%,30% 100%)}.screen .scircle{position:absolute;width:67px;height:67px;right:8px;top:3px;border-radius:50%;border:1px solid rgba(221,251,232,.3)}.device-btn-row{display:flex;gap:8px;flex-wrap:wrap}.action-pill{display:inline-flex;align-items:center;justify-content:center;gap:7px;border-radius:10px;padding:10px 12px;font-size:11px;font-weight:690;transition:.18s;white-space:nowrap;min-width:0}.samsung .action-pill{color:#ecf7ef;border:1px solid rgba(255,255,255,.13);background:rgba(255,255,255,.08)}.action-pill.main{background:var(--emerald);color:#fff;border-color:transparent}.samsung .power{margin-left:auto;padding:9px 11px}.samsung.tv-off .tv-info h3{opacity:.5}.samsung.tv-off .screen{filter:grayscale(1);opacity:.35}.samsung.tv-off .status i{background:#899a90}\n.fire{padding:14px 16px;background:var(--panel2);display:flex;align-items:center;justify-content:space-between;gap:11px}.fire-id{display:flex;gap:11px;align-items:center;min-width:0}.fire-logo{width:39px;height:39px;border-radius:13px;display:grid;place-items:center;color:#f4f6f3;background:linear-gradient(135deg,#ef9b42,#a34d2b)}.f-main{font-size:12px;font-weight:760}.f-meta{font-size:10px;color:var(--muted);margin-top:3px}.fire-actions{display:flex;gap:5px;align-items:center}.icon-btn{width:34px;height:34px;display:grid;place-items:center;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:10px;transition:transform .18s}.fire-actions .icon-btn{width:33px;height:33px}.fire-actions .primary{color:var(--emerald)}\n.alexa{padding:17px;background:var(--panel2)}.section-top{display:flex;justify-content:space-between;align-items:center;gap:7px;margin-bottom:13px}.sec-name{font-size:11px;font-weight:800;letter-spacing:.02em;display:flex;gap:8px;align-items:center}.sec-name .ico{color:var(--emerald)}.tag{color:var(--greenText);font-size:9px;background:var(--soft);border-radius:40px;padding:5px 8px;white-space:nowrap}.alexa-body{display:flex;align-items:center;justify-content:space-between;gap:15px}.track{display:flex;gap:10px;align-items:center;min-width:0}.art{width:61px;height:61px;border-radius:13px;background:radial-gradient(circle at 66% 33%,#87d6bb 0 10%,transparent 11%),radial-gradient(circle at 70% 70%,#1d6e61 0 24%,transparent 25%),linear-gradient(140deg,#2c645d,#102831);display:grid;place-items:center;flex:none;box-shadow:0 8px 19px rgba(3,28,20,.13);color:#c5eadb}.tracktext{min-width:0}.track-title{font-size:12px;font-weight:770;line-height:1.35}.track-sub{font-size:10px;color:var(--muted);margin:5px 0 8px;line-height:1.25}.playbar{display:flex;gap:7px}.mini-play{border:0;background:none;padding:3px;color:var(--ink)}.mini-play.active{color:var(--emerald)}.vol-group{display:flex;align-items:center;gap:8px;flex:none}.vol-btn{width:29px;height:29px;border:1px solid var(--line);background:var(--panel);color:var(--ink);display:grid;place-items:center;border-radius:9px}.vol-ring{--angle:151deg;width:92px;height:92px;border-radius:50%;background:conic-gradient(var(--emerald) 0deg var(--angle),var(--ring) var(--angle) 360deg);padding:9px;box-shadow:0 7px 22px var(--glow);position:relative}.vol-inner{background:var(--panel);width:100%;height:100%;border-radius:50%;display:flex;flex-direction:column;align-items:center;justify-content:center}.vol-inner strong{font-size:22px;line-height:1;letter-spacing:-.06em;font-variant-numeric:tabular-nums}.vol-inner span{font-size:8px;color:var(--muted);margin-top:5px;font-weight:670;letter-spacing:.09em}.volume-line{display:flex;gap:10px;align-items:center;margin-top:13px}.volume-line .ico{color:var(--muted)}input[type=range]{appearance:none;-webkit-appearance:none;flex:1;height:5px;border-radius:20px;background:linear-gradient(to right,var(--emerald) 0%,var(--emerald) var(--fill,42%),var(--ring) var(--fill,42%),var(--ring) 100%);min-width:0;cursor:pointer}input[type=range]::-webkit-slider-thumb{appearance:none;width:15px;height:15px;border:3px solid var(--panel);background:var(--emerald);border-radius:50%;box-shadow:0 0 0 1px rgba(20,130,85,.26)}input[type=range]::-moz-range-thumb{width:10px;height:10px;border:3px solid var(--panel);background:var(--emerald);border-radius:50%;box-shadow:0 0 0 1px rgba(20,130,85,.26)}.volume-line output{width:30px;text-align:right;font-size:10px;color:var(--muted);font-variant-numeric:tabular-nums}\n.ambient{padding:13px 15px;background:linear-gradient(100deg,rgba(141,105,196,.095),rgba(29,180,124,.075));display:flex;align-items:center;justify-content:space-between;gap:9px;flex-wrap:wrap}.ambient-left{display:flex;align-items:center;gap:10px}.amb-logo{height:34px;width:34px;display:grid;place-items:center;border-radius:11px;background:linear-gradient(135deg,#9875c8,#51bba1);color:white}.amb-brightness{display:flex;gap:8px;align-items:center;flex:1;min-width:95px;max-width:115px}.switch{width:40px;height:24px;border-radius:20px;padding:3px;border:0;background:var(--switch);display:inline-flex;align-items:center;justify-content:flex-start;flex:none;transition:background .2s}.switch:after{content:'';width:18px;height:18px;box-shadow:0 2px 5px rgba(0,0,0,.12);background:white;display:block;border-radius:50%;transition:transform .2s}.switch.on{background:var(--emerald)}.switch.on:after{transform:translateX(16px)}.ambient-controls{display:flex;gap:11px;align-items:center}.ambient .f-meta{font-size:10px}\n.scripts{padding:14px 15px}.script-list{display:flex;flex-wrap:wrap;gap:7px}.script-button{border-radius:10px;border:1px solid var(--line);color:var(--ink);background:var(--panel);display:flex;align-items:center;gap:7px;padding:10px 12px;font-size:11px;font-weight:690}.script-button .ico{color:var(--emerald)}.script-button:hover{border-color:var(--emerald)}.details{background:var(--soft);border-radius:11px;color:var(--greenText);width:100%;border:0;padding:12px 14px;display:flex;align-items:center;justify-content:space-between;font-size:11px;font-weight:750;margin-top:14px}.details .ico{width:15px;height:15px}.foot{display:flex;justify-content:space-between;font-size:10px;color:var(--muted);padding:12px 3px 0;gap:10px}.foot b{color:var(--emerald);font-weight:680}\n.editor{border-radius:22px;background:var(--panel);border:1px solid var(--line);box-shadow:var(--shadow);overflow:hidden}.editor-head{padding:19px 20px 15px;border-bottom:1px solid var(--line)}.editor-head .top-title{font-size:16px;font-weight:760;letter-spacing:-.035em;margin:6px 0 4px}.editor-head p{font-size:11px;color:var(--muted);margin:0;line-height:1.5}.tabs{display:flex;padding:10px;gap:4px;background:var(--panel2);border-bottom:1px solid var(--line)}.tabs button{flex:1;border:0;background:none;color:var(--muted);font-weight:720;font-size:11px;padding:10px 4px;border-radius:10px}.tabs button.selected{color:var(--greenText);background:var(--panel);box-shadow:0 1px 4px rgba(0,0,0,.045)}.settings-body{padding:17px 19px 19px;min-height:410px}.setting-group{margin-bottom:21px}.setting-group:last-child{margin-bottom:0}.group-title{font-size:10px;letter-spacing:.14em;color:var(--muted);font-weight:780;margin-bottom:10px}.setting{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:11px 0;border-bottom:1px solid var(--line)}.setting:last-child{border-bottom:0}.setting .setting-name{font-size:12px;font-weight:680}.setting .setting-description{font-size:10px;line-height:1.4;color:var(--muted);margin-top:4px;max-width:240px}.setting .switch{transform:scale(.9);transform-origin:right}.preset-row{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}.preset{background:var(--panel2);border:1px solid var(--line);border-radius:11px;padding:11px 5px;color:var(--ink);font-size:10px;font-weight:720}.preset.active{border-color:var(--emerald);background:var(--soft);color:var(--greenText)}.entity-group{padding-top:5px}.field{margin:12px 0 0}.field label{display:block;font-size:10px;font-weight:720;color:var(--muted);margin-bottom:7px}.field input{width:100%;border:1px solid var(--line);background:var(--panel2);color:var(--ink);border-radius:10px;padding:11px 12px;font-size:11px;outline:none}.field input:focus{border-color:var(--emerald)}.field input::placeholder{color:var(--muted);opacity:.78}.tip{font-size:10px;color:var(--muted);background:var(--panel2);padding:12px;border-radius:11px;line-height:1.6;margin-top:14px}.tip .ico{color:var(--emerald)}.settings-bottom{border-top:1px solid var(--line);padding:14px 19px;font-size:10px;color:var(--muted);line-height:1.5}.editor-actions{display:flex;gap:7px;align-items:center;margin-top:10px}.green-btn{border:0;background:var(--emerald);color:white;border-radius:10px;font-size:11px;padding:10px 13px;font-weight:720}.lite-btn{border:1px solid var(--line);background:var(--panel2);color:var(--ink);font-size:11px;padding:10px 13px;border-radius:10px}.script-edit-row{display:flex;gap:6px;margin-top:8px}.script-edit-row input{flex:1;min-width:0;border-radius:9px;background:var(--panel2);border:1px solid var(--line);padding:10px;font-size:11px;color:var(--ink)}.script-edit-row button{border:1px solid var(--line);background:var(--panel2);color:var(--muted);border-radius:9px;padding:0 10px}.editor-small{font-size:10px;color:var(--muted);line-height:1.55;margin:10px 0}.hidden{display:none!important}\n/* Dialog */\n.overlay{position:fixed;z-index:50;inset:0;padding:24px;display:none;align-items:center;justify-content:center;background:rgba(9,20,16,.60);backdrop-filter:blur(4px)}.overlay.open{display:flex}.dialog{width:min(430px,100%);max-height:min(690px,calc(100dvh - 48px));display:flex;flex-direction:column;background:var(--panel);border-radius:22px;border:1px solid var(--line);box-shadow:0 30px 70px rgba(0,0,0,.25);overflow:hidden}.dialog-header{background:var(--panel);flex:none;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:19px 19px 15px;border-bottom:1px solid var(--line);z-index:1}.dialog-header h3{font-size:17px;letter-spacing:-.035em;margin:4px 0 0}.dialog-content{overflow-y:auto;overscroll-behavior:contain;flex:1;padding:18px 19px 20px}.dialog-item{border-radius:12px;border:1px solid var(--line);padding:13px;display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;background:var(--panel2)}.dialog-item span{display:block;font-weight:750;font-size:12px}.dialog-item small{color:var(--muted);display:block;font-size:10px;margin-top:4px}.dialog-item.active{border-color:var(--emerald);background:var(--soft)}.dialog-item .ico{color:var(--emerald)}.dialog-note{font-size:10px;line-height:1.6;color:var(--muted);margin:14px 0 0}.remote-frame{background:var(--panel2);border:1px solid var(--line);border-radius:18px;padding:15px;max-width:290px;margin:auto}.remote-switcher{display:flex;gap:8px;margin-bottom:15px}.remote-switcher button{flex:1;border-radius:9px;background:var(--panel);color:var(--muted);border:1px solid var(--line);padding:10px;font-size:11px;font-weight:750}.remote-switcher button.active{background:var(--emerald);color:#fff;border-color:var(--emerald)}.remote-top{display:flex;justify-content:space-between;margin-bottom:13px}.remote-top button,.remote-bottom button{height:37px;border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:11px;padding:0 13px;display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:700}.dpad{width:181px;height:181px;margin:auto;display:grid;grid-template-areas:'. up .' 'left ok right' '. down .';grid-template-columns:repeat(3,1fr);grid-template-rows:repeat(3,1fr);background:var(--panel);border-radius:50%;padding:6px;border:1px solid var(--line);box-shadow:0 6px 15px rgba(0,0,0,.04)}.dpad button{border:0;background:transparent;display:grid;place-items:center;color:var(--ink);border-radius:50%}.dpad button:hover{background:var(--soft)}.dpad .ok{grid-area:ok;background:var(--emerald);color:white;font-size:12px;font-weight:800;box-shadow:0 5px 13px var(--glow)}.dpad .up{grid-area:up}.dpad .down{grid-area:down}.dpad .left{grid-area:left}.dpad .right{grid-area:right}.remote-bottom{display:flex;justify-content:space-around;gap:9px;margin-top:16px}.remote-bottom button{flex:1;justify-content:center}.remote-num{display:flex;gap:6px;margin-top:10px}.remote-num button{flex:1;background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:10px;padding:9px}.toast{position:fixed;bottom:23px;left:50%;transform:translate(-50%,15px);max-width:min(440px,calc(100% - 30px));background:#182c24;color:#f1fff7;border:1px solid #426651;border-radius:12px;padding:12px 16px;font-size:12px;opacity:0;pointer-events:none;transition:opacity .22s,transform .22s;box-shadow:0 10px 35px #0002;z-index:80;text-align:center}.toast.show{opacity:1;transform:translate(-50%,0)}:host([data-dark]) .toast{background:#d8f8e5;color:#17382a}\n@media(min-width:1070px){.media-card{padding:23px}.sections{gap:12px}.samsung{padding:20px}.alexa{padding:18px}}@media(max-width:980px){.workspace{grid-template-columns:minmax(0,1fr) minmax(260px,.8fr);gap:16px}.container{width:min(1100px,calc(100% - 28px))}.preview-shell{padding:12px}.media-card{padding:15px}.vol-ring{height:78px;width:78px}.vol-inner strong{font-size:19px}.alexa-body{gap:7px}.track{gap:7px}.art{width:50px;height:50px}}@media(max-width:750px){.top{height:70px}.heading{padding:25px 0}.workspace{grid-template-columns:minmax(0,1fr)}.media-card{padding:19px}.preview-shell{padding:16px}.editor{max-width:750px}.settings-body{min-height:0}.vol-ring{height:90px;width:90px}.art{width:61px;height:61px}}@media(max-width:420px){.container{width:calc(100% - 22px)}.brand-text{font-size:11px}.brand-text span{font-size:10px}.mark{width:36px;height:36px;border-radius:12px}.status-chip{font-size:9px;padding:9px}.heading h1{font-size:27px}.heading p{font-size:12px}.preview-shell{padding:9px;border-radius:21px}.media-card{padding:13px;border-radius:18px}.media-head h2{font-size:18px}.media-head{margin-bottom:14px}.samsung{padding:13px}.tv-info h3{font-size:18px}.tv-content{min-height:102px}.screen{width:103px;height:63px}.action-pill{font-size:10px;padding:9px 10px}.fire{padding:11px}.fire-actions{gap:3px}.fire-actions .icon-btn{width:30px;height:30px}.alexa{padding:12px}.track{align-items:flex-start}.art{width:42px;height:42px}.track-title{font-size:11px}.track-sub{font-size:9px}.vol-group{gap:5px}.vol-ring{height:72px;width:72px;padding:7px}.vol-inner strong{font-size:18px}.vol-btn{width:23px;height:27px}.vol-btn .ico{width:14px;height:14px}.vol-inner span{font-size:7px}.script-button{font-size:10px;padding:9px}.amb-brightness{max-width:95px}.ambient-controls{gap:6px}.foot{font-size:9px}}@media(max-width:345px){.screen{display:none}.fire-logo{width:32px;height:32px}.vol-group{gap:3px}.vol-btn{width:20px}.vol-ring{height:64px;width:64px}.art{display:none}}\n@media(prefers-reduced-motion:reduce){*,*:before,*:after{scroll-behavior:auto!important;animation:none!important;transition:none!important}}\n\n:host{display:block;min-width:0;container-type:inline-size;color:var(--ink);font-family:Inter,-apple-system,BlinkMacSystemFont,\"Segoe UI\",Roboto,Arial,sans-serif;--ha-card-border-radius:23px}\nbutton,input{font-family:inherit}\nbutton[hidden],[hidden]{display:none!important}\n.media-card{box-sizing:border-box;width:100%;color:var(--ink)}\n.device.unavailable{opacity:.75}\n.device .state-unavailable{color:var(--muted)}\n.media-head.no-title .head-left,.media-head.no-title .head-icon{display:none}\n.media-head.no-title{justify-content:flex-end;margin-bottom:12px}\n.script-list:empty:after{content:\"Nessuno script configurato\";font-size:11px;color:var(--muted)}\n.action-pill:disabled,.icon-btn:disabled,.mini-play:disabled,.vol-btn:disabled,.switch:disabled{opacity:.4;cursor:not-allowed;transform:none}\n.ambient-controls input:disabled{opacity:.4;cursor:not-allowed}\n.media-card .device .f-meta,.media-card .track-title,.media-card .track-sub{overflow-wrap:anywhere}\n@container(max-width:520px){.media-card{padding:16px}.samsung{padding:15px}.screen{width:110px;height:70px}.alexa{padding:14px}.vol-ring{width:82px;height:82px}.vol-inner strong{font-size:20px}.vol-group{gap:5px}.track{gap:8px}.art{width:50px;height:50px}.fire{padding:12px}.media-head h2{font-size:19px}}\n@container(max-width:380px){.media-card{padding:13px;border-radius:19px}.tv-info h3{font-size:19px}.screen{width:85px;height:56px;border-width:4px}.alexa-body{gap:8px}.vol-ring{width:69px;height:69px;padding:7px}.vol-inner strong{font-size:17px}.vol-btn{width:24px;height:27px}.art{width:42px;height:42px}.track-title{font-size:11px}.tag{font-size:8px}.action-pill{padding:9px 10px}.fire-logo{width:33px;height:33px}.fire-actions .icon-btn{width:29px}}\n@container(max-width:315px){.screen{display:none}.alexa-body{flex-wrap:wrap}.vol-group{width:100%;justify-content:flex-end}.ambient-controls{width:100%;justify-content:space-between}.script-list{display:grid;grid-template-columns:1fr}}\n@media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}\n\n/* Edera standard: native Home Assistant MDI icons, compact title punctuation. */\nha-icon.ico{display:inline-flex;align-items:center;justify-content:center;flex:none;width:19px;height:19px;--mdc-icon-size:19px;vertical-align:middle;fill:currentColor;stroke:none}\nha-icon.ico.sm{width:16px;height:16px;--mdc-icon-size:16px}\nha-icon.ico.lg{width:23px;height:23px;--mdc-icon-size:23px}\n.media-head h2 .dot{font-weight:800;color:var(--emerald);font-size:inherit;letter-spacing:0}\n/* Editor follows Camera Grid View Card standard layout and controls. */\n.editor{border:0;box-shadow:none;border-radius:0;background:transparent;overflow:visible}\n.editor .tabs{display:flex;gap:5px;padding:0 0 14px;background:transparent;border-bottom:1px solid var(--line);overflow-x:auto;position:static}\n.editor .tabs button{flex:none;border:0;background:none;color:var(--muted);border-radius:13px;padding:10px 13px;white-space:nowrap;font-weight:500;font-size:13px}\n.editor .tabs button.selected{color:var(--ink);background:var(--panel2);font-weight:650}\n.editor .editor-head{padding:24px 0 0;border:0;background:none}\n.editor .editor-head .eyebrow{display:none}\n.editor .editor-head .top-title{font-size:21px;font-weight:500;line-height:1.3;letter-spacing:-.025em}\n.editor .editor-head p{font-size:13px;color:var(--muted);line-height:1.5;margin:8px 0 16px}\n.editor .setting-group{padding:12px 0 20px;border-bottom:1px solid var(--line)}\n.editor .setting-group:last-child{border-bottom:0}\n.editor .group-title{font-size:13px;letter-spacing:0;font-weight:620;color:var(--ink);margin-bottom:8px}\n.editor .setting{display:flex;align-items:center;justify-content:space-between;gap:18px;border-bottom:1px solid var(--line);padding:15px 0}\n.editor .setting:last-child{border-bottom:0}\n.editor .setting label{min-width:0;flex:1;cursor:pointer}\n.editor .setting-name{font-weight:500;font-size:14px;line-height:1.4}\n.editor .setting-description{font-size:12px;line-height:1.5;color:var(--muted);margin-top:3px}\n.editor input[type=checkbox]{width:18px;height:18px;flex:none;accent-color:var(--emerald);cursor:pointer}\n.editor .field{margin:20px 0}\n.editor .field>label{display:block;font-size:14px;font-weight:500;margin-bottom:10px;color:var(--ink)}\n.editor .field input:not([type=checkbox]),.editor .field select{display:block;width:100%;min-height:49px;padding:12px 13px;background:var(--panel2);color:var(--ink);border:0;border-bottom:1px solid var(--line);border-radius:11px 11px 0 0;font-size:14px}\n.editor .field ha-selector{display:block;width:100%}\n.editor .settings-bottom{display:none}\n.editor .tip{margin:14px 0 0;padding:0;background:transparent;color:var(--muted);font-size:12px;line-height:1.5}\n.editor .green-btn,.editor .remove{border-radius:14px;font-size:13px;font-weight:500;padding:10px 14px}\n@media(max-width:480px){.editor .setting-group{padding:10px 0 18px}.editor .editor-head{padding:19px 0 0}}\n\n\n/* Authoritative Edera typography and surfaces copied from Weather Pulse Card's current CSS. */\n:host{font-family:var(--ha-font-family-body,Roboto,Arial,sans-serif);font-size:var(--ha-font-size-m,14px);--panel:#fafbf9;--panel2:#f0f2ef;--ink:#18221c;--muted:#56675c;--line:#e0e5df;--emerald:#0a7156;color:var(--ink)}\n:host([data-dark]){--panel:#101211;--panel2:#191c1a;--ink:#f5f7f4;--muted:#bbc5bd;--line:#2b302c;--emerald:#0e795d}\n.media-card{box-shadow:none;border-radius:26px;padding:18px;font-family:inherit;font-size:14px}\n.media-head{align-items:flex-start;gap:12px;margin:2px 4px 17px}\n.head-left{align-items:flex-start;gap:0;min-width:0}\n.head-icon{display:none}\n.media-head .micro{font-size:10px;letter-spacing:1.7px;font-weight:750;margin-bottom:7px;line-height:normal;text-transform:uppercase;color:var(--muted)}\n.media-head h2{font-size:25px!important;line-height:1.14;font-weight:780;letter-spacing:-.7px;margin:0;white-space:normal;overflow-wrap:anywhere;color:var(--ink)}\n.media-head h2 b.dot{color:var(--emerald);font-weight:800;font-size:inherit;letter-spacing:0}\n.media-head .subhead{font-size:12px;line-height:1.45;margin:7px 0 0;color:var(--muted)}\n/* Align labels, internal titles, controls and editor typography with the Weather/Camera family. */\n.device-id,.sec-name{font-size:12px;font-weight:650;letter-spacing:0}\n.tv-info h3{font-size:23px;font-weight:650;letter-spacing:-.7px}\n.f-main,.track-title{font-size:14px;font-weight:600;letter-spacing:0}\n.action-pill,.icon-btn,.script-list button{font-weight:600}\n.editor{font-family:inherit;font-size:14px}\n.editor .tabs{border-bottom:1px solid var(--line);padding:0 0 14px;background:transparent;gap:5px}\n.editor .tabs button{font-size:14px;font-weight:400;padding:10px 13px;border-radius:13px;flex:initial;color:var(--muted)}\n.editor .tabs button.selected{color:var(--ink);font-weight:650;background:var(--panel2)}\n.editor .editor-head{padding:24px 0 0;border:0;background:transparent}\n.editor .editor-head .top-title{font-size:21px;font-weight:500;line-height:1.3;letter-spacing:0}\n.editor .editor-head p{font-size:13px;line-height:1.5;color:var(--muted);margin:8px 0 16px}\n.editor .group-title{font-size:14px;letter-spacing:0;font-weight:600;color:var(--ink)}\n.editor .setting-name{font-size:14px;font-weight:500;line-height:1.4}\n.editor .field>label{font-size:14px;font-weight:500;color:var(--ink)}\n.editor .field input:not([type=checkbox]),.editor .field select{font-size:14px}\n.editor .setting-description,.editor .editor-small,.editor .tip{font-size:12px;line-height:1.5;color:var(--muted)}\n.editor .entity-setting{display:flex;gap:8px;align-items:center;min-width:0}\n.editor .entity-setting .entity-selector{flex:1;min-width:0}\n.editor .clear-entity{flex:none;display:grid;place-items:center;width:36px;height:36px;padding:0;border-radius:50%;border:1px solid var(--line);background:var(--panel2);color:var(--muted);cursor:pointer}\n.editor .clear-entity ha-icon{--mdc-icon-size:18px;width:18px;height:18px}\n.editor .clear-entity:hover{color:var(--ink);border-color:var(--emerald)}\n.editor .clear-entity:focus-visible{outline:2px solid var(--emerald);outline-offset:2px}\n.editor .clear-entity:disabled{opacity:.38;cursor:default}\n@container(max-width:520px){.media-head h2{font-size:23px!important}.media-card{padding:13px;border-radius:23px}}\n@container(max-width:310px){.media-head h2{font-size:21px!important}.media-head .micro{font-size:9px}}\n\n/* Match the typographic hierarchy of Weather Pulse Card without changing Home Assistant's fonts. */\n:host{font-family:var(--ha-font-family-body,Roboto,Arial,sans-serif);font-size:var(--ha-font-size-m,14px)}\n.media-card .micro{font-size:10px;letter-spacing:1.7px;font-weight:750;color:var(--muted);margin-bottom:7px}\n.media-card .media-head h2{font-size:25px;line-height:1.14;font-weight:780;letter-spacing:-.7px}\n.media-card .f-main,.media-card .sec-name,.media-card .device-id{font-size:14px;font-weight:600;letter-spacing:0}\n.media-card .f-meta,.media-card .track-sub{font-size:12px;line-height:1.4}\n.media-card .track-title{font-size:14px;font-weight:600}\n@container(max-width:420px){.media-card .media-head h2{font-size:23px}}\n/* Optional compact layout: modules remain configurable independently. */\n.sections.compact-mode{gap:7px}\n.media-card:has(.sections.compact-mode){padding:13px;border-radius:23px}\n.sections.compact-mode .samsung{padding:12px}\n.sections.compact-mode .tv-content{min-height:64px}\n.sections.compact-mode .screen{width:90px;height:51px;border-width:3px;border-bottom-width:5px}\n.sections.compact-mode .action-pill{padding:7px 10px}\n.sections.compact-mode .fire,.sections.compact-mode .ambient{padding:9px 12px}\n.sections.compact-mode .alexa{padding:11px 12px}\n.sections.compact-mode .vol-ring{width:72px;height:72px;padding:7px}\n.sections.compact-mode .vol-inner strong{font-size:18px}\n.sections.compact-mode .art{width:43px;height:43px}\n.sections.compact-mode .volume-line{margin-top:8px}\n.remote-link{width:100%;margin:10px 0 0;padding:11px 13px;border-radius:12px;background:var(--panel2);border:1px solid var(--line);color:var(--ink);font-size:13px;display:flex;align-items:center;gap:8px}\n.power-menu{display:grid;grid-template-columns:1fr 1fr;gap:10px}\n.power-menu button{display:flex;align-items:center;justify-content:center;gap:7px;padding:13px 10px;border-radius:14px;border:1px solid var(--line);color:var(--ink);background:var(--panel2);font-size:12px;font-weight:600}\n@media(max-width:360px){.power-menu{grid-template-columns:1fr}}\n\n.alexa .art{overflow:hidden;position:relative}.alexa .art img{display:block;width:100%;height:100%;object-fit:cover;border-radius:inherit}.alexa .art img[hidden]{display:none}.media-head .micro[hidden],.media-head h2[hidden]{display:none}.volume-line{gap:8px}\n\n/* Stable layout: never translate media buttons on hover or click. */\n.media-card button,.media-card button:hover,.media-card button:active{transform:none!important}\n.media-card .action-pill,.media-card .icon-btn,.media-card .circle-btn{transition:none!important}\n.media-card{max-width:100%;overflow:clip}\n.media-card .device{min-width:0}\n.media-card .device-id,.media-card .sec-name{min-width:0}\n/* Toggling lights must not change card height when the status label changes. */\n.media-card .ambient{flex-wrap:nowrap;min-height:64px}\n.media-card .ambient-left{flex:1 1 0;min-width:0}\n.media-card .ambient-left>div:last-child{flex:1 1 auto;min-width:0}\n.media-card .ambient .f-main,.media-card .ambient .f-meta{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}\n.media-card .ambient-controls{flex:0 0 auto;min-width:0}\n/* Long HA entity names or media titles cannot push controls into another row. */\n.media-card .fire-id{flex:1 1 0;min-width:0}\n.media-card .fire-id>div:last-child{min-width:0;flex:1 1 0}\n.media-card .fire .f-main,.media-card .fire .f-meta{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block}\n.media-card .fire-actions{flex:0 0 auto}\n.media-card .alexa-body{min-width:0}\n.media-card .alexa .track{flex:1 1 0;min-width:0}\n.media-card .alexa .tracktext{min-width:0;flex:1 1 0;overflow:hidden}\n.media-card .alexa .track-title,.media-card .alexa .track-sub{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}\n.media-card .alexa .vol-group{flex:0 0 auto}\n/* Feedback must not add an extra row below the card when a command fails. */\n.feedback{position:fixed;bottom:max(16px,env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);z-index:10000;max-width:min(410px,calc(100vw - 30px));padding:12px 14px;background:#182c24;color:white;border-radius:12px;box-shadow:0 10px 30px #0003;font-size:12px;line-height:1.45;pointer-events:none}\n:host([data-dark]) .feedback{background:#e0f4e8;color:#182d22}\n@container(max-width:335px){\n .media-card .ambient{display:grid;grid-template-columns:minmax(0,1fr);gap:8px}\n .media-card .ambient-left,.media-card .ambient-controls{width:100%;min-width:0}\n .media-card .ambient-controls{justify-content:space-between}\n}\n@container(max-width:290px){\n .media-card .fire{flex-wrap:wrap}\n .media-card .fire-actions{width:100%;justify-content:flex-end}\n}\n";
-const EXTRA_CSS = `
-:host{--circle:#fff;--track:#d8dfd9;--warnbg:#f9f3de;--warnbd:#d3bd63;--warnfg:#5f4a10;--btnfg:var(--emerald)}
-:host([data-dark]){--circle:#282b29;--track:#323a35;--warnbg:#302b1b;--warnbd:#816e31;--warnfg:#f1d78b;--btnfg:var(--ink)}
-.sections{gap:8px}
-.sections .device{background:var(--panel2);border:1px solid var(--line);border-radius:17px;padding:14px;color:var(--ink)}
-.sections .device.unavailable{opacity:1}
-.dev-head{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:10px;align-items:center;min-width:0}
-.dev-info{min-width:0}
-.dev-info .f-main,.dev-info .f-meta{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.ico-circle{width:36px;height:36px;border-radius:50%;display:grid;place-items:center;flex:none;background:var(--circle);color:var(--muted);box-shadow:inset 0 0 0 1px var(--line)}
-.ico-circle.on{background:color-mix(in srgb,var(--emerald) 14%,transparent);color:var(--btnfg);box-shadow:none}
-.ico-circle.warn{background:var(--warnbg);color:var(--warnfg);box-shadow:inset 0 0 0 1px var(--warnbd)}
-#tvCircle,#tvCircle.on,#tvCircle.warn{width:auto;height:auto;background:none;box-shadow:none;color:var(--muted)}
-#audioCircle,#audioCircle.on,#audioCircle.warn{width:auto;height:auto;background:none;box-shadow:none;color:var(--btnfg)}
-#audioCircle.warn{color:var(--warnfg)}
-#fireCircle{width:40px;height:40px;border-radius:13px}
-#lightCircle{width:36px;height:36px;border-radius:12px}
-.badge{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);white-space:nowrap}
-.badge:before{content:'';width:7px;height:7px;border-radius:50%;background:currentColor;flex:none}
-.badge.on{color:var(--btnfg)}
-.badge.on:before{background:var(--emerald)}
-.badge.warn{color:var(--warnfg)}
-.badge.warn:before{background:var(--warnbd)}
-.tv-hero{font-size:18px;font-weight:650;letter-spacing:-.4px;margin:12px 0 0}
-.samsung .device-btn-row{margin-top:12px;align-items:center}
-.media-card .action-pill{padding:9px 12px;border-radius:10px;font-size:12px;color:var(--ink);background:var(--panel);border:1px solid var(--line)}
-.media-card .action-pill:hover{border-color:var(--emerald)}
-.media-card .action-pill.power{width:36px;min-width:36px;height:36px;padding:0;border-radius:11px;margin-left:auto}
-.media-card .action-pill.pw-on,.media-card .icon-btn.pw-on{background:color-mix(in srgb,var(--emerald) 14%,transparent);border-color:color-mix(in srgb,var(--emerald) 45%,transparent);color:var(--btnfg)}
-.media-card .action-pill.pw-warn{background:var(--warnbg);border-color:var(--warnbd);color:var(--warnfg)}
-.media-card .action-pill.pw-off,.media-card .icon-btn.pw-off{color:var(--muted)}
-.hint{font-size:12px;line-height:1.45;color:var(--warnfg);margin-top:10px}
-.sections .fire{display:block}
-.media-card .fire-actions{display:flex;gap:6px;align-items:center}
-.media-card .fire-actions .icon-btn,.media-card .icon-btn{width:36px;height:36px;border-radius:11px;background:var(--panel);border:1px solid var(--line);color:var(--ink)}
-.media-card .icon-btn.primary{color:var(--btnfg)}
-.media-card .icon-btn.pw-on{background:color-mix(in srgb,var(--emerald) 14%,transparent);border-color:color-mix(in srgb,var(--emerald) 45%,transparent);color:var(--btnfg)}
-.media-card .icon-btn.pw-off{color:var(--muted)}
-.alexa-body{margin-top:12px}
-.media-card .alexa .art{width:50px;height:50px;border-radius:13px;background:color-mix(in srgb,var(--emerald) 14%,transparent);box-shadow:none;color:var(--btnfg)}
-.media-card .vol-ring{position:relative;width:98px;height:98px;padding:0;border-radius:0;background:none;box-shadow:none}
-.media-card .sections.compact-mode .vol-ring{padding:0}
-.vol-ring svg{width:100%;height:100%;display:block}
-.vol-ring .vt{fill:none;stroke:var(--track);stroke-width:9}
-.vol-ring .va{fill:none;stroke:var(--emerald);stroke-width:9;stroke-linecap:round;stroke-dasharray:251.3;stroke-dashoffset:251.3;transition:stroke-dashoffset .2s}
-.media-card .vol-ring .vol-inner{position:absolute;inset:0;width:auto;height:auto;background:none}
-.media-card .vol-ring .vol-inner strong{font-size:24px}
-.media-card .vol-btn{width:36px;height:36px;border-radius:11px;background:var(--panel);border:1px solid var(--line);color:var(--ink)}
-@container(max-width:380px){.media-card .vol-ring{width:78px;height:78px}.media-card .vol-ring .vol-inner strong{font-size:20px}}
-.volume-line{display:flex;align-items:center;gap:12px;margin-top:14px}
-.volume-line .mini-play{width:40px;height:40px;padding:0;border-radius:10px;border:1px solid var(--line);background:var(--panel);display:grid;place-items:center;color:var(--ink);flex:none}
-.volume-line output{width:42px;text-align:right;font-size:14px;font-weight:600;color:var(--ink);font-variant-numeric:tabular-nums}
-.media-card input[type=range]{height:10px;border-radius:20px;background:linear-gradient(to right,var(--emerald) 0,var(--emerald) var(--fill,0%),var(--track) var(--fill,0%),var(--track) 100%)}
-.media-card input[type=range]::-webkit-slider-thumb{width:24px;height:24px;border:4px solid var(--panel2);background:var(--emerald);border-radius:50%;box-shadow:0 0 0 1px var(--emerald)}
-.media-card input[type=range]::-moz-range-thumb{width:16px;height:16px;border:4px solid var(--panel2);background:var(--emerald);border-radius:50%;box-shadow:0 0 0 1px var(--emerald)}
-.media-card input[type=range]:disabled{opacity:.4}
-.novol{display:flex;align-items:center;gap:14px;margin-top:12px}
-.novol .nr{position:relative;width:64px;height:64px;flex:none}
-.novol .nr svg{width:100%;height:100%;display:block}
-.novol .nr .vt{fill:none;stroke:var(--track);stroke-width:9;stroke-dasharray:6 8}
-.novol .nr span{position:absolute;inset:0;display:grid;place-items:center;font-size:20px;color:var(--muted)}
-.media-card .ambient{display:block;min-height:0;flex-wrap:wrap;background:var(--panel2)}
-.ambient .volume-line{margin-top:12px}
-.script-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
-.script-button{min-height:44px;border-radius:10px;background:var(--panel);border:1px solid var(--line);padding:10px 12px;min-width:0;color:var(--ink)}
-.script-button span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.script-button.run{border-color:var(--emerald);color:var(--btnfg)}
-.script-button:disabled{opacity:.4}
-.spin{animation:mfspin .9s linear infinite}
-@keyframes mfspin{to{transform:rotate(360deg)}}
-.overlay{background:#0009;backdrop-filter:none;padding:max(16px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) max(16px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left))}
-.dialog{width:min(390px,100%);max-height:min(88vh,680px);border-radius:26px;background:var(--panel);color:var(--ink);border:1px solid var(--line);box-shadow:0 18px 60px #0005}
-.dialog-header{padding:16px 16px 12px 18px;background:var(--panel);border-bottom:1px solid var(--line)}
-.dialog-header h3{font-size:17px;font-weight:600;line-height:1.3;margin:0;letter-spacing:0;overflow-wrap:anywhere}
-#dialogEyebrow{display:none}
-.dialog-content{padding:12px 18px 18px}
-.circle-btn{width:40px;height:40px;border-radius:50%;background:var(--panel2);border:1px solid var(--line);color:var(--ink)}
-.dialog-item{border:0;border-radius:16px;background:var(--panel2)}
-.dialog-item.active{border:0;background:var(--panel2);box-shadow:inset 0 0 0 2px var(--emerald)}
-button.dialog-item:hover{box-shadow:inset 0 0 0 1px var(--emerald)}
-.dialog-item.active:hover{box-shadow:inset 0 0 0 2px var(--emerald)}
-.dialog button:focus-visible,.circle-btn:focus-visible{outline:2px solid var(--emerald);outline-offset:2px}
-.dialog-content{overflow-y:auto;overscroll-behavior:contain}
-.remote-switcher{position:sticky;top:-12px;z-index:2;margin:-12px -18px 14px;padding:12px 18px 10px;background:var(--panel);border-bottom:1px solid var(--line)}
-.remote-switcher button{border-radius:12px;font-size:12px}
-.remote-switcher button.active{background:var(--emerald);color:#fff;border-color:var(--emerald)}
-.diag{display:grid;gap:8px;margin-top:8px}
-.diag-row{background:var(--panel2);border-radius:14px;padding:10px 12px}
-.diag-row .dn{font-size:13px;font-weight:600}
-.diag-row .ds{font-size:12px;color:var(--muted);margin-top:2px}
-.diag-row .df{font-size:12px;margin-top:6px;line-height:1.7}
-.diag .y{color:var(--btnfg);font-weight:650}
-.diag .n{color:var(--warnfg);font-weight:650}
+/* ------------------------------------------------------------------ i18n */
+const I18N = {
+  it: {
+    tv: "TV", streaming: "Lettore streaming", audio: "Home Theater", light: "Luci LED TV", scripts: "Script",
+    on_f: "Accesa", off_f: "Spenta", on_m: "Acceso", off_m: "Spento", playing: "In riproduzione", paused: "In pausa",
+    unreachable: "Non raggiungibile", unavailable: "Non disponibile", lights_on: "Accese", lights_off: "Spente",
+    actions: n => n === 1 ? "1 azione" : `${n} azioni`, nothing: "Nessun brano", volume: "VOLUME", mute: "Mute",
+    prev: "Precedente", next: "Successiva", playpause: "Riproduci o pausa", vol_down: "Abbassa volume", vol_up: "Alza volume",
+    sources: "Sorgenti", tv_sources: "Sorgenti TV", inputs: "Ingressi", in_use: "In uso", available: "Disponibile",
+    remote: "Telecomando", apps: "App del lettore", all_apps: "Tutte le app", tap_open: "Tocca per aprire", open_now: "Aperta ora", open_on: "Apri sul lettore",
+    power: "Power", power_tv: "Accendi o spegni TV", power_st: "Accendi o spegni lettore", source: "Sorgente", back: "Indietro", home: "Home", app: "App", menu: "Menu",
+    up: "Su", down: "Giù", left: "Sinistra", right: "Destra", rew: "Indietro veloce", ff: "Avanti veloce", ch_up: "Canale su", ch_down: "Canale giù",
+    brightness: "Luminosità", light_switch: "Accendi o spegni", run: "Tocca per avviare", running: "In esecuzione",
+    script_actions: "Script e azioni", empty: "Nessuna sezione da mostrare. Scegli le entità nella configurazione.",
+    no_sources: "Questa entità non espone sorgenti selezionabili.", no_apps: "Nessuna app configurata. Aggiungile nella configurazione, modulo Lettore streaming.",
+    err: "Comando non riuscito", cfg_entity: "Configura un'entità valida nell'editor", no_app_id: "Inserisci l'ID dell'app nella configurazione",
+    tv_no_on: "La TV non si accende da sola: configura uno script di accensione.", tv_no_off: "La TV non si spegne da sola: configura uno script di spegnimento.",
+    st_no_power: "Il lettore non espone l'accensione: attiva l'accensione tramite ADB o configura il telecomando.",
+    no_remote: "Configura il telecomando nella configurazione.", close: "Chiudi", invalid: "Configurazione non valida",
+    // editor
+    tabs: "Sezioni", t_play: "Riproduzione", t_mods: "Moduli", t_look: "Aspetto",
+    play_desc: "Il pannello in alto con brano, comandi e volume a cerchio. Spento: la card mostra solo i moduli scelti.",
+    e_audio: "Entità audio", e_audio_h: "Il volume del cerchio e il mute (tocco sul numero) agiscono su questa entità.",
+    e_panel: "Pannello Riproduzione", e_panel_h: "Brano, comandi e volume.", e_progress: "Barra di avanzamento", e_progress_h: "Mostra posizione e durata quando il media player le fornisce.",
+    e_artwork: "Copertina da", e_art_audio: "Home Theater", e_art_st: "Lettore streaming", e_art_none: "Nessuna", e_name: "Nome (facoltativo)", e_name_h: "Vuoto: usa il nome dell'entità.",
+    mods_desc: "Ogni modulo funziona anche da solo. Un modulo spento o senza entità non compare. Con le frecce cambi l'ordine nella card. Per una card con un solo modulo, spegni il pannello Riproduzione e lascia attivo solo quello.",
+    h_tv: "Stato, sorgenti, accensione e telecomando unico.", h_streaming: "Stato, riproduzione, app e accensione.", h_light: "Piastrella con interruttore e luminosità nel popup.", h_scripts: "Piastrella che apre l'elenco delle tue azioni.",
+    mod_on: "Modulo attivo", mv_up: n => `Sposta su ${n}`, mv_dn: n => `Sposta giù ${n}`,
+    e_tv: "Entità TV", e_tv_remote: "Telecomando TV", e_tv_remote_h: "Serve per frecce, OK, Home, Indietro, volume e canali della TV.",
+    e_on_script: "Script di accensione", e_on_script_h: "Facoltativo: per le TV che non si accendono da sole.", e_off_script: "Script di spegnimento", e_off_script_h: "Facoltativo.",
+    e_target: "Frecce, OK, Home e Indietro del telecomando vanno a", e_target_h: "Power, sorgente, volume, mute e canali vanno sempre alla TV.",
+    tg_auto: "Automatico: lettore se acceso, altrimenti TV", tg_tv: "Sempre alla TV", tg_st: "Sempre al lettore streaming",
+    e_st: "Entità lettore", e_st_remote: "Telecomando lettore", e_st_remote_h: "Facoltativo: senza telecomando i tasti usano i comandi ADB del lettore.",
+    e_adb: "Accensione tramite ADB (Fire TV)", e_adb_h: "Solo con l'integrazione Android Debug Bridge: usa WAKEUP e SLEEP.",
+    e_show_apps: "Mostra le app sulla card", e_apps: "App", e_apps_h: "Per ogni app: icona, nome e ID. Con la Fire TV l'ID lo leggi in Home Assistant con l'app aperta: Strumenti per sviluppatori › Stati, attributo app_id del lettore.",
+    app_name: "Nome app", app_id: "ID app, es. com.esempio.app", app_icon: "Icona", add_app: "+ Aggiungi app", remove: "Rimuovi",
+    e_light: "Entità luce", e_scripts: "Script", script_name: "Nome del pulsante", add_script: "+ Aggiungi script",
+    e_eyebrow: "Intestazione superiore", e_title: "Titolo", e_title_h: "Il punto verde finale lo aggiunge la card.",
+    e_show_eyebrow: "Mostra intestazione superiore", e_show_title: "Mostra titolo",
+    e_highlight: "Colora TV e lettore quando sono accesi", e_highlight_h: "Solo i loro riquadri. Il resto della card resta neutro.",
+    e_theme: "Tema", th_auto: "Automatico (Home Assistant)", e_lang: "Lingua", lang_auto: "Automatica (Home Assistant)", e_lang_h: "Automatica segue la lingua dell'utente in Home Assistant. Se la lingua non è disponibile si usa l'inglese.",
+    diag: "Diagnostica", diag_h: "Mostra le funzioni che ogni entità dichiara adesso. Riapri la scheda per aggiornare.",
+    d_todo: "Da configurare", d_nf: "Entità non trovata", d_na: "Non disponibile", d_ok: "Disponibile", yes: "Sì", no: "No",
+    f_on: "Accensione", f_off: "Spegnimento", f_src: "Sorgenti", f_vol: "Volume", f_mute: "Mute", f_level: "Livello volume", f_prev: "Precedente", f_next: "Successiva"
+  },
+  en: {
+    tv: "TV", streaming: "Streaming player", audio: "Home Theater", light: "TV LED lights", scripts: "Scripts",
+    on_f: "On", off_f: "Off", on_m: "On", off_m: "Off", playing: "Playing", paused: "Paused",
+    unreachable: "Unreachable", unavailable: "Unavailable", lights_on: "On", lights_off: "Off",
+    actions: n => n === 1 ? "1 action" : `${n} actions`, nothing: "Nothing playing", volume: "VOLUME", mute: "Mute",
+    prev: "Previous", next: "Next", playpause: "Play or pause", vol_down: "Volume down", vol_up: "Volume up",
+    sources: "Sources", tv_sources: "TV sources", inputs: "Inputs", in_use: "In use", available: "Available",
+    remote: "Remote", apps: "Player apps", all_apps: "All apps", tap_open: "Tap to open", open_now: "Open now", open_on: "Open on the player",
+    power: "Power", power_tv: "Turn the TV on or off", power_st: "Turn the player on or off", source: "Source", back: "Back", home: "Home", app: "Apps", menu: "Menu",
+    up: "Up", down: "Down", left: "Left", right: "Right", rew: "Rewind", ff: "Fast forward", ch_up: "Channel up", ch_down: "Channel down",
+    brightness: "Brightness", light_switch: "Turn on or off", run: "Tap to run", running: "Running",
+    script_actions: "Scripts and actions", empty: "Nothing to show. Choose the entities in the configuration.",
+    no_sources: "This entity exposes no selectable sources.", no_apps: "No apps configured. Add them in the configuration, Streaming player module.",
+    err: "Command failed", cfg_entity: "Set a valid entity in the editor", no_app_id: "Enter the app ID in the configuration",
+    tv_no_on: "This TV can't turn on by itself: set a turn-on script.", tv_no_off: "This TV can't turn off by itself: set a turn-off script.",
+    st_no_power: "The player doesn't expose power control: enable ADB power or set the remote.",
+    no_remote: "Set the remote in the configuration.", close: "Close", invalid: "Invalid configuration",
+    tabs: "Sections", t_play: "Playback", t_mods: "Modules", t_look: "Appearance",
+    play_desc: "The top panel with track, controls and the volume ring. Off: the card shows only the chosen modules.",
+    e_audio: "Audio entity", e_audio_h: "The volume ring and mute (tap the number) act on this entity.",
+    e_panel: "Playback panel", e_panel_h: "Track, controls and volume.", e_progress: "Progress bar", e_progress_h: "Shows position and duration when the media player provides them.",
+    e_artwork: "Artwork from", e_art_audio: "Home Theater", e_art_st: "Streaming player", e_art_none: "None", e_name: "Name (optional)", e_name_h: "Empty: uses the entity name.",
+    mods_desc: "Each module also works on its own. A module that is off or has no entity is not shown. Use the arrows to change the order in the card. For a card with a single module, turn off the Playback panel and leave only that module on.",
+    h_tv: "State, sources, power and the single remote.", h_streaming: "State, playback, apps and power.", h_light: "Tile with switch and brightness in the popup.", h_scripts: "Tile that opens the list of your actions.",
+    mod_on: "Module on", mv_up: n => `Move ${n} up`, mv_dn: n => `Move ${n} down`,
+    e_tv: "TV entity", e_tv_remote: "TV remote", e_tv_remote_h: "Needed for the TV's arrows, OK, Home, Back, volume and channels.",
+    e_on_script: "Turn-on script", e_on_script_h: "Optional: for TVs that can't turn on by themselves.", e_off_script: "Turn-off script", e_off_script_h: "Optional.",
+    e_target: "Remote arrows, OK, Home and Back go to", e_target_h: "Power, source, volume, mute and channels always go to the TV.",
+    tg_auto: "Automatic: player if on, otherwise TV", tg_tv: "Always the TV", tg_st: "Always the streaming player",
+    e_st: "Player entity", e_st_remote: "Player remote", e_st_remote_h: "Optional: without a remote the keys use the player's ADB commands.",
+    e_adb: "Power via ADB (Fire TV)", e_adb_h: "Android Debug Bridge integration only: uses WAKEUP and SLEEP.",
+    e_show_apps: "Show apps on the card", e_apps: "Apps", e_apps_h: "For each app: icon, name and ID. With Fire TV, read the ID in Home Assistant while the app is open: Developer tools › States, the player's app_id attribute.",
+    app_name: "App name", app_id: "App ID, e.g. com.example.app", app_icon: "Icon", add_app: "+ Add app", remove: "Remove",
+    e_light: "Light entity", e_scripts: "Scripts", script_name: "Button name", add_script: "+ Add script",
+    e_eyebrow: "Top label", e_title: "Title", e_title_h: "The green dot at the end is added by the card.",
+    e_show_eyebrow: "Show top label", e_show_title: "Show title",
+    e_highlight: "Colour TV and player when on", e_highlight_h: "Only their tiles. The rest of the card stays neutral.",
+    e_theme: "Theme", th_auto: "Automatic (Home Assistant)", e_lang: "Language", lang_auto: "Automatic (Home Assistant)", e_lang_h: "Automatic follows the user's language in Home Assistant. If it isn't available, English is used.",
+    diag: "Diagnostics", diag_h: "Shows the features each entity declares right now. Reopen the tab to refresh.",
+    d_todo: "Not set", d_nf: "Entity not found", d_na: "Unavailable", d_ok: "Available", yes: "Yes", no: "No",
+    f_on: "Turn on", f_off: "Turn off", f_src: "Sources", f_vol: "Volume", f_mute: "Mute", f_level: "Volume level", f_prev: "Previous", f_next: "Next"
+  },
+  de: {
+    tv: "TV", streaming: "Streaming-Player", audio: "Heimkino", light: "TV-LED-Licht", scripts: "Skripte",
+    on_f: "An", off_f: "Aus", on_m: "An", off_m: "Aus", playing: "Wiedergabe", paused: "Pausiert",
+    unreachable: "Nicht erreichbar", unavailable: "Nicht verfügbar", lights_on: "An", lights_off: "Aus",
+    actions: n => n === 1 ? "1 Aktion" : `${n} Aktionen`, nothing: "Keine Wiedergabe", volume: "LAUTSTÄRKE", mute: "Stumm",
+    prev: "Zurück", next: "Weiter", playpause: "Wiedergabe oder Pause", vol_down: "Leiser", vol_up: "Lauter",
+    sources: "Quellen", tv_sources: "TV-Quellen", inputs: "Eingänge", in_use: "Aktiv", available: "Verfügbar",
+    remote: "Fernbedienung", apps: "Player-Apps", all_apps: "Alle Apps", tap_open: "Zum Öffnen tippen", open_now: "Jetzt geöffnet", open_on: "Auf dem Player öffnen",
+    power: "Ein/Aus", power_tv: "TV ein- oder ausschalten", power_st: "Player ein- oder ausschalten", source: "Quelle", back: "Zurück", home: "Home", app: "Apps", menu: "Menü",
+    up: "Hoch", down: "Runter", left: "Links", right: "Rechts", rew: "Zurückspulen", ff: "Vorspulen", ch_up: "Kanal hoch", ch_down: "Kanal runter",
+    brightness: "Helligkeit", light_switch: "Ein- oder ausschalten", run: "Zum Starten tippen", running: "Läuft",
+    script_actions: "Skripte und Aktionen", empty: "Nichts anzuzeigen. Wähle die Entitäten in der Konfiguration.",
+    no_sources: "Diese Entität bietet keine auswählbaren Quellen.", no_apps: "Keine Apps konfiguriert. Füge sie in der Konfiguration im Modul Streaming-Player hinzu.",
+    err: "Befehl fehlgeschlagen", cfg_entity: "Lege im Editor eine gültige Entität fest", no_app_id: "Gib die App-ID in der Konfiguration ein",
+    tv_no_on: "Dieser TV schaltet sich nicht selbst ein: lege ein Einschalt-Skript fest.", tv_no_off: "Dieser TV schaltet sich nicht selbst aus: lege ein Ausschalt-Skript fest.",
+    st_no_power: "Der Player bietet kein Ein/Aus: aktiviere Ein/Aus per ADB oder lege die Fernbedienung fest.",
+    no_remote: "Lege die Fernbedienung in der Konfiguration fest.", close: "Schließen", invalid: "Ungültige Konfiguration",
+    tabs: "Bereiche", t_play: "Wiedergabe", t_mods: "Module", t_look: "Darstellung",
+    play_desc: "Das obere Feld mit Titel, Steuerung und Lautstärkering. Aus: Die Karte zeigt nur die gewählten Module.",
+    e_audio: "Audio-Entität", e_audio_h: "Lautstärkering und Stummschaltung (Tippen auf die Zahl) wirken auf diese Entität.",
+    e_panel: "Wiedergabefeld", e_panel_h: "Titel, Steuerung und Lautstärke.", e_progress: "Fortschrittsbalken", e_progress_h: "Zeigt Position und Dauer, wenn der Media Player sie liefert.",
+    e_artwork: "Cover von", e_art_audio: "Heimkino", e_art_st: "Streaming-Player", e_art_none: "Keins", e_name: "Name (optional)", e_name_h: "Leer: Name der Entität.",
+    mods_desc: "Jedes Modul funktioniert auch allein. Ein ausgeschaltetes Modul oder eines ohne Entität wird nicht angezeigt. Mit den Pfeilen änderst du die Reihenfolge. Für eine Karte mit nur einem Modul schalte das Wiedergabefeld aus und lass nur dieses Modul an.",
+    h_tv: "Status, Quellen, Ein/Aus und die gemeinsame Fernbedienung.", h_streaming: "Status, Wiedergabe, Apps und Ein/Aus.", h_light: "Kachel mit Schalter und Helligkeit im Pop-up.", h_scripts: "Kachel, die die Liste deiner Aktionen öffnet.",
+    mod_on: "Modul aktiv", mv_up: n => `${n} nach oben`, mv_dn: n => `${n} nach unten`,
+    e_tv: "TV-Entität", e_tv_remote: "TV-Fernbedienung", e_tv_remote_h: "Für Pfeile, OK, Home, Zurück, Lautstärke und Kanäle des TV.",
+    e_on_script: "Einschalt-Skript", e_on_script_h: "Optional: für TVs, die sich nicht selbst einschalten.", e_off_script: "Ausschalt-Skript", e_off_script_h: "Optional.",
+    e_target: "Pfeile, OK, Home und Zurück der Fernbedienung gehen an", e_target_h: "Ein/Aus, Quelle, Lautstärke, Stumm und Kanäle gehen immer an den TV.",
+    tg_auto: "Automatisch: Player, wenn an, sonst TV", tg_tv: "Immer an den TV", tg_st: "Immer an den Streaming-Player",
+    e_st: "Player-Entität", e_st_remote: "Player-Fernbedienung", e_st_remote_h: "Optional: Ohne Fernbedienung nutzen die Tasten die ADB-Befehle des Players.",
+    e_adb: "Ein/Aus per ADB (Fire TV)", e_adb_h: "Nur mit der Integration Android Debug Bridge: nutzt WAKEUP und SLEEP.",
+    e_show_apps: "Apps auf der Karte zeigen", e_apps: "Apps", e_apps_h: "Für jede App: Symbol, Name und ID. Beim Fire TV liest du die ID in Home Assistant bei geöffneter App ab: Entwicklerwerkzeuge › Zustände, Attribut app_id des Players.",
+    app_name: "App-Name", app_id: "App-ID, z. B. com.beispiel.app", app_icon: "Symbol", add_app: "+ App hinzufügen", remove: "Entfernen",
+    e_light: "Licht-Entität", e_scripts: "Skripte", script_name: "Name der Taste", add_script: "+ Skript hinzufügen",
+    e_eyebrow: "Obere Beschriftung", e_title: "Titel", e_title_h: "Den grünen Punkt am Ende setzt die Karte.",
+    e_show_eyebrow: "Obere Beschriftung zeigen", e_show_title: "Titel zeigen",
+    e_highlight: "TV und Player färben, wenn an", e_highlight_h: "Nur ihre Felder. Der Rest der Karte bleibt neutral.",
+    e_theme: "Design", th_auto: "Automatisch (Home Assistant)", e_lang: "Sprache", lang_auto: "Automatisch (Home Assistant)", e_lang_h: "Automatisch folgt der Sprache des Benutzers in Home Assistant. Ist sie nicht verfügbar, wird Englisch verwendet.",
+    diag: "Diagnose", diag_h: "Zeigt die Funktionen, die jede Entität gerade meldet. Öffne den Bereich erneut zum Aktualisieren.",
+    d_todo: "Nicht festgelegt", d_nf: "Entität nicht gefunden", d_na: "Nicht verfügbar", d_ok: "Verfügbar", yes: "Ja", no: "Nein",
+    f_on: "Einschalten", f_off: "Ausschalten", f_src: "Quellen", f_vol: "Lautstärke", f_mute: "Stumm", f_level: "Lautstärkepegel", f_prev: "Zurück", f_next: "Weiter"
+  },
+  fr: {
+    tv: "TV", streaming: "Lecteur de streaming", audio: "Home cinéma", light: "LED de la TV", scripts: "Scripts",
+    on_f: "Allumée", off_f: "Éteinte", on_m: "Allumé", off_m: "Éteint", playing: "Lecture", paused: "En pause",
+    unreachable: "Injoignable", unavailable: "Indisponible", lights_on: "Allumées", lights_off: "Éteintes",
+    actions: n => n === 1 ? "1 action" : `${n} actions`, nothing: "Aucune lecture", volume: "VOLUME", mute: "Muet",
+    prev: "Précédent", next: "Suivant", playpause: "Lecture ou pause", vol_down: "Baisser le volume", vol_up: "Monter le volume",
+    sources: "Sources", tv_sources: "Sources TV", inputs: "Entrées", in_use: "Utilisée", available: "Disponible",
+    remote: "Télécommande", apps: "Apps du lecteur", all_apps: "Toutes les apps", tap_open: "Touchez pour ouvrir", open_now: "Ouverte", open_on: "Ouvrir sur le lecteur",
+    power: "Marche", power_tv: "Allumer ou éteindre la TV", power_st: "Allumer ou éteindre le lecteur", source: "Source", back: "Retour", home: "Accueil", app: "Apps", menu: "Menu",
+    up: "Haut", down: "Bas", left: "Gauche", right: "Droite", rew: "Retour rapide", ff: "Avance rapide", ch_up: "Chaîne suivante", ch_down: "Chaîne précédente",
+    brightness: "Luminosité", light_switch: "Allumer ou éteindre", run: "Touchez pour lancer", running: "En cours",
+    script_actions: "Scripts et actions", empty: "Rien à afficher. Choisissez les entités dans la configuration.",
+    no_sources: "Cette entité n'expose aucune source sélectionnable.", no_apps: "Aucune app configurée. Ajoutez-les dans la configuration, module Lecteur de streaming.",
+    err: "Échec de la commande", cfg_entity: "Choisissez une entité valide dans l'éditeur", no_app_id: "Saisissez l'ID de l'app dans la configuration",
+    tv_no_on: "Cette TV ne s'allume pas seule : définissez un script d'allumage.", tv_no_off: "Cette TV ne s'éteint pas seule : définissez un script d'extinction.",
+    st_no_power: "Le lecteur n'expose pas la mise en marche : activez la marche via ADB ou définissez la télécommande.",
+    no_remote: "Définissez la télécommande dans la configuration.", close: "Fermer", invalid: "Configuration non valide",
+    tabs: "Sections", t_play: "Lecture", t_mods: "Modules", t_look: "Apparence",
+    play_desc: "Le panneau du haut avec titre, commandes et anneau de volume. Désactivé : la carte n'affiche que les modules choisis.",
+    e_audio: "Entité audio", e_audio_h: "L'anneau de volume et le mode muet (toucher le chiffre) agissent sur cette entité.",
+    e_panel: "Panneau Lecture", e_panel_h: "Titre, commandes et volume.", e_progress: "Barre de progression", e_progress_h: "Affiche la position et la durée quand le lecteur média les fournit.",
+    e_artwork: "Pochette depuis", e_art_audio: "Home cinéma", e_art_st: "Lecteur de streaming", e_art_none: "Aucune", e_name: "Nom (facultatif)", e_name_h: "Vide : utilise le nom de l'entité.",
+    mods_desc: "Chaque module fonctionne aussi seul. Un module désactivé ou sans entité n'apparaît pas. Les flèches changent l'ordre dans la carte. Pour une carte avec un seul module, désactivez le panneau Lecture et ne laissez que ce module actif.",
+    h_tv: "État, sources, mise en marche et télécommande unique.", h_streaming: "État, lecture, apps et mise en marche.", h_light: "Tuile avec interrupteur et luminosité dans la fenêtre.", h_scripts: "Tuile qui ouvre la liste de vos actions.",
+    mod_on: "Module actif", mv_up: n => `Monter ${n}`, mv_dn: n => `Descendre ${n}`,
+    e_tv: "Entité TV", e_tv_remote: "Télécommande TV", e_tv_remote_h: "Sert aux flèches, OK, Accueil, Retour, volume et chaînes de la TV.",
+    e_on_script: "Script d'allumage", e_on_script_h: "Facultatif : pour les TV qui ne s'allument pas seules.", e_off_script: "Script d'extinction", e_off_script_h: "Facultatif.",
+    e_target: "Les flèches, OK, Accueil et Retour de la télécommande vont à", e_target_h: "Marche, source, volume, muet et chaînes vont toujours à la TV.",
+    tg_auto: "Automatique : lecteur s'il est allumé, sinon TV", tg_tv: "Toujours la TV", tg_st: "Toujours le lecteur de streaming",
+    e_st: "Entité lecteur", e_st_remote: "Télécommande du lecteur", e_st_remote_h: "Facultatif : sans télécommande, les touches utilisent les commandes ADB du lecteur.",
+    e_adb: "Mise en marche via ADB (Fire TV)", e_adb_h: "Uniquement avec l'intégration Android Debug Bridge : utilise WAKEUP et SLEEP.",
+    e_show_apps: "Afficher les apps sur la carte", e_apps: "Apps", e_apps_h: "Pour chaque app : icône, nom et ID. Avec Fire TV, lisez l'ID dans Home Assistant pendant que l'app est ouverte : Outils de développement › États, attribut app_id du lecteur.",
+    app_name: "Nom de l'app", app_id: "ID de l'app, ex. com.exemple.app", app_icon: "Icône", add_app: "+ Ajouter une app", remove: "Supprimer",
+    e_light: "Entité lumière", e_scripts: "Scripts", script_name: "Nom du bouton", add_script: "+ Ajouter un script",
+    e_eyebrow: "Libellé supérieur", e_title: "Titre", e_title_h: "Le point vert final est ajouté par la carte.",
+    e_show_eyebrow: "Afficher le libellé supérieur", e_show_title: "Afficher le titre",
+    e_highlight: "Colorer la TV et le lecteur quand ils sont allumés", e_highlight_h: "Seulement leurs cadres. Le reste de la carte reste neutre.",
+    e_theme: "Thème", th_auto: "Automatique (Home Assistant)", e_lang: "Langue", lang_auto: "Automatique (Home Assistant)", e_lang_h: "Automatique suit la langue de l'utilisateur dans Home Assistant. Si elle n'est pas disponible, l'anglais est utilisé.",
+    diag: "Diagnostic", diag_h: "Affiche les fonctions que chaque entité déclare maintenant. Rouvrez l'onglet pour actualiser.",
+    d_todo: "À configurer", d_nf: "Entité introuvable", d_na: "Indisponible", d_ok: "Disponible", yes: "Oui", no: "Non",
+    f_on: "Allumage", f_off: "Extinction", f_src: "Sources", f_vol: "Volume", f_mute: "Muet", f_level: "Niveau du volume", f_prev: "Précédent", f_next: "Suivant"
+  }
+};
+const pickLang = (cfg, hass) => {
+  if (cfg && cfg !== "auto" && I18N[cfg]) return cfg;
+  const l = String(hass?.locale?.language || hass?.language || (typeof navigator !== "undefined" ? navigator.language : "") || "en").slice(0, 2).toLowerCase();
+  return I18N[l] ? l : "en";
+};
+const tr = (lang, key, ...a) => { const v = (I18N[lang] || I18N.en)[key] ?? I18N.en[key] ?? key; return typeof v === "function" ? v(...a) : v; };
+
+/* --------------------------------------------------------------- helpers */
+const entityValid = (id, domain) => typeof id === "string" && id.startsWith(domain + ".") && /^[a-z0-9_]+$/.test(id.slice(domain.length + 1));
+const esc = v => String(v ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" })[c]);
+const clamp = (v, min, max) => Math.min(max, Math.max(min, Number(v)));
+const short = (s, fb) => (typeof s === "string" && s.trim() ? s.trim() : fb);
+const validState = s => !!s && !["unavailable", "unknown"].includes(s.state);
+const isOn = s => !!s && !["off", "standby", "unavailable", "unknown"].includes(s.state);
+const supports = (s, f) => Number.isInteger(s?.attributes?.supported_features) && (s.attributes.supported_features & f) === f;
+const iconOk = v => typeof v === "string" && /^mdi:[a-z0-9-]+$/.test(v);
+const appIdOk = v => typeof v === "string" && /^[A-Za-z0-9._-]{1,120}$/.test(v);
+const ico = (icon, cls = "") => `<ha-icon class="ico ${cls}" icon="${iconOk(icon) ? icon : "mdi:information-outline"}" aria-hidden="true"></ha-icon>`;
+const fmtTime = s => { s = Math.max(0, Math.floor(Number(s) || 0)); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = String(s % 60).padStart(2, "0"); return h ? `${h}:${String(m).padStart(2, "0")}:${x}` : `${m}:${x}`; };
+const IS_PHONE = () => Math.min(window.screen?.width || 9999, window.screen?.height || 9999) < 600;
+
+const normalize = config => {
+  const src = { ...(config || {}) };
+  for (const [oldKey, newKey] of Object.entries(LEGACY_KEYS)) {
+    if (Object.hasOwn(src, oldKey)) { if (!Object.hasOwn(src, newKey)) src[newKey] = src[oldKey]; delete src[oldKey]; }
+  }
+  if (src.artwork_source === "alexa") src.artwork_source = "audio";
+  if (src.artwork_source === "fire") src.artwork_source = "streaming";
+  const c = { ...DEFAULT, ...src };
+  if (!["auto", "light", "dark"].includes(c.theme)) c.theme = "auto";
+  if (!["audio", "streaming", "none"].includes(c.artwork_source)) c.artwork_source = "audio";
+  if (!["auto", "tv", "streaming"].includes(c.remote_target)) c.remote_target = "auto";
+  if (c.language !== "auto" && !I18N[c.language]) c.language = "auto";
+  for (const k of ["eyebrow", "title", "tv_name", "streaming_name", "audio_name", "light_name"]) c[k] = typeof c[k] === "string" ? c[k].trim().slice(0, 70) : "";
+  for (const k of ["show_eyebrow", "show_title", "show_audio", "show_progress", "show_tv", "show_streaming", "show_light", "show_scripts", "highlight_on", "show_apps", "streaming_adb_power"]) c[k] = c[k] !== false && (k !== "streaming_adb_power" || c[k] === true);
+  const order = Array.isArray(c.order) ? c.order.filter(k => MODULES.includes(k)) : [];
+  c.order = [...new Set(order)].concat(MODULES.filter(k => !order.includes(k)));
+  c.apps = Array.isArray(c.apps) ? c.apps.slice(0, 20).map(a => ({ name: String(a?.name ?? "").slice(0, 40), app_id: String(a?.app_id ?? "").trim().slice(0, 120), icon: iconOk(a?.icon) ? a.icon : "" })) : [];
+  c.scripts = Array.isArray(c.scripts) ? c.scripts.slice(0, 30).map(s => ({ name: String(s?.name ?? "").slice(0, 60), entity_id: String(s?.entity_id ?? "") })) : [];
+  return c;
+};
+
+/* ----------------------------------------------------------------- styles */
+const PALETTE = `
+:host{--p:#fafbf9;--p2:#f0f2ef;--c:#fff;--ink:#18221c;--mu:#56675c;--ln:#e0e5df;--em:#0a7156;--fg:#0a7156;--tr:#d8dfd9;--g0:#bfe9d4;--g1:#dcf3e8;--g2:#e6f4f1;--gb:#8fd0b3;--gt:#0a7156;--wbg:#f9f3de;--wbd:#d3bd63;--wfg:#5f4a10;--lit-b:color-mix(in srgb,#fff 70%,transparent);--lit-on:#0a7156}
+:host([data-dark]){--p:#101211;--p2:#191c1a;--c:#282b29;--ink:#f5f7f4;--mu:#bbc5bd;--ln:#2b302c;--em:#0e795d;--fg:#f5f7f4;--tr:#323a35;--g0:#16523d;--g1:#0f372b;--g2:#13302e;--gb:#1f6b52;--gt:#6fe0b0;--wbg:#302b1b;--wbd:#816e31;--wfg:#f1d78b;--lit-b:color-mix(in srgb,#000 35%,transparent);--lit-on:#13a07a}
 `;
-const ICONS = "";
-const CARD_HTML = `<article class="media-card" role="group" aria-label="Media Fusion">
-<header class="media-head" id="cardHeader"><div class="head-left"><div><div class="micro">MEDIA FUSION CARD</div><h2 id="viewTitle">Media Center<b class="dot">.</b></h2><p class="subhead" id="viewSubtitle" hidden></p></div></div></header>
-<div class="sections" id="sections">
-<section class="device samsung" data-section="samsung" id="samsung"><div class="dev-head"><span class="ico-circle" id="tvCircle"><ha-icon class="ico" icon="mdi:television" aria-hidden="true"></ha-icon></span><div class="dev-info"><div class="f-main" id="tvName">TV</div><div class="f-meta" id="tvInput" hidden></div></div><span class="badge" id="tvState"><span>Spenta</span></span></div><h3 class="tv-hero" id="tvHero" hidden></h3><div class="device-btn-row"><button class="action-pill" data-open="sources"><ha-icon class="ico sm" icon="mdi:format-list-bulleted" aria-hidden="true"></ha-icon> Sorgenti</button><button class="action-pill" data-open="remote-samsung"><ha-icon class="ico sm" icon="mdi:remote-tv" aria-hidden="true"></ha-icon> Telecomando</button><button aria-label="Accendi o spegni TV" class="action-pill power" id="tvPower" title="Accendi/spegni TV"><ha-icon class="ico sm" icon="mdi:power" aria-hidden="true"></ha-icon></button></div><div class="hint" id="tvHint" role="status" hidden></div></section>
-<section class="device alexa" data-section="alexa"><div class="dev-head"><span class="ico-circle" id="audioCircle"><ha-icon class="ico" icon="mdi:volume-high" aria-hidden="true"></ha-icon></span><div class="dev-info"><div class="f-main" id="audioName">Home Theater</div></div><span class="tag">Da configurare</span></div><div class="alexa-body"><div class="track"><div aria-hidden="true" class="art"><ha-icon class="ico lg" icon="mdi:volume-high" aria-hidden="true"></ha-icon></div><div class="tracktext"><div class="track-title">Riproduzione</div><div class="track-sub" id="trackMeta">Controlli multimediali</div><div class="playbar"><button aria-label="Precedente" class="mini-play" id="alexaPrev" hidden><ha-icon class="ico sm" icon="mdi:skip-previous" aria-hidden="true"></ha-icon></button><button aria-label="Riproduzione Alexa" class="mini-play active" id="alexaPlay"><ha-icon class="ico sm" icon="mdi:play" aria-hidden="true"></ha-icon></button><button aria-label="Successiva" class="mini-play" id="alexaNext" hidden><ha-icon class="ico sm" icon="mdi:skip-next" aria-hidden="true"></ha-icon></button></div></div></div><div class="vol-group" id="volGroup"><button aria-label="Abbassa volume Alexa" class="vol-btn" id="volMinus"><ha-icon class="ico" icon="mdi:minus" aria-hidden="true"></ha-icon></button><div class="vol-ring" id="volRing"><svg viewBox="0 0 96 96" aria-hidden="true"><circle class="vt" cx="48" cy="48" r="40"></circle><circle class="va" id="volArc" cx="48" cy="48" r="40" transform="rotate(-90 48 48)"></circle></svg><div class="vol-inner"><strong id="volNumber">—</strong><span>VOLUME</span></div></div><button aria-label="Alza volume Alexa" class="vol-btn" id="volPlus"><ha-icon class="ico" icon="mdi:plus" aria-hidden="true"></ha-icon></button></div></div><div class="volume-line" id="volLine"><button aria-label="Mute Alexa" class="mini-play" id="volMute" title="Attiva o disattiva mute Alexa"><ha-icon class="ico sm" icon="mdi:volume-high" aria-hidden="true"></ha-icon></button><input aria-label="Volume Alexa" id="volume" max="100" min="0" type="range" value="0"/><output id="volOut">—</output></div><div class="novol" id="noVol" hidden><div class="nr"><svg viewBox="0 0 96 96" aria-hidden="true"><circle class="vt" cx="48" cy="48" r="40"></circle></svg><span>—</span></div><div><div class="f-main" id="noVolTitle">Volume non disponibile</div><div class="f-meta" id="noVolText">L'entità non fornisce il livello del volume.</div></div></div></section>
-<section class="device fire" data-section="fire"><div class="dev-head"><span class="ico-circle" id="fireCircle"><ha-icon id="fireIcon" class="ico" icon="mdi:television-play" aria-hidden="true"></ha-icon></span><div class="dev-info"><div class="f-main" id="fireName">Lettore streaming</div><div class="f-meta" id="fireMeta">Da configurare</div></div><div class="fire-actions"><button aria-label="App lettore streaming" class="icon-btn" data-open="fireapps" title="Applicazioni e sorgenti"><ha-icon class="ico sm" icon="mdi:format-list-bulleted" aria-hidden="true"></ha-icon></button><button aria-label="Accendi o spegni lettore streaming" class="icon-btn" id="firePower" title="Accendi o spegni lettore streaming"><ha-icon class="ico sm" icon="mdi:power" aria-hidden="true"></ha-icon></button><button aria-label="Riproduci o pausa" class="icon-btn primary" id="firePlay" title="Riproduci o pausa lettore streaming" hidden><ha-icon class="ico sm" icon="mdi:play" aria-hidden="true"></ha-icon></button></div></div></section>
-<section class="device ambient" data-section="ambilight"><div class="dev-head"><span class="ico-circle" id="lightCircle"><ha-icon id="lightIcon" class="ico" icon="mdi:led-strip-variant" aria-hidden="true"></ha-icon></span><div class="dev-info"><div class="f-main" id="lightName">Luci LED TV</div><div class="f-meta" id="ambientLabel">Da configurare</div></div><button aria-checked="false" aria-label="Accendi o spegni luci LED TV" class="switch" id="ambientSwitch" role="switch"></button></div><div class="volume-line" id="brightnessWrap"><ha-icon class="ico sm" icon="mdi:white-balance-sunny" aria-hidden="true"></ha-icon><input aria-label="Luminosità luci LED TV" id="brightness" max="100" min="1" type="range" value="68"/><output id="brightOut">—</output></div></section>
-<section class="device scripts" data-section="scripts"><div class="section-top" style="margin-bottom:10px"><div class="sec-name"><ha-icon class="ico sm" icon="mdi:lightning-bolt-outline" aria-hidden="true"></ha-icon><span>Script e azioni</span></div><span class="tiny" id="scriptCount">0 azioni</span></div><div class="script-list" id="scriptButtons"></div></section>
-</div></article>`;
+const COMMON = `
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+[hidden]{display:none!important}
+button{font:inherit;cursor:pointer;color:inherit;-webkit-user-select:none;user-select:none}
+button:focus{outline:none}
+button:focus-visible{outline:2px solid var(--em);outline-offset:2px}
+button:disabled{cursor:not-allowed}
+ha-icon.ico{display:inline-flex;align-items:center;justify-content:center;flex:none;width:18px;height:18px;--mdc-icon-size:18px;line-height:0}
+ha-icon.ico.sm{width:16px;height:16px;--mdc-icon-size:16px}
+ha-icon.ico.lg{width:22px;height:22px;--mdc-icon-size:22px}
+@media (prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important}}
+`;
+const CARD_CSS = PALETTE + COMMON + `
+:host{display:block;min-width:0;font-family:var(--ha-font-family-body,Roboto,Arial,sans-serif)}
+.wrap{container-type:inline-size;min-width:0}
+.mf{display:block;background:var(--p);color:var(--ink);border:1px solid var(--ln);border-radius:26px;padding:16px;min-width:0;font-size:14px;overflow:clip}
+.hd{margin:2px 4px 15px;min-width:0}
+.ey{font-size:10px;letter-spacing:1.7px;font-weight:750;color:var(--mu);text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:normal}
+.ti{font-size:25px;font-weight:780;letter-spacing:-.7px;line-height:1.14;margin:7px 0 0;overflow-wrap:anywhere}
+.ti:first-child{margin-top:0}
+.ti b{color:var(--em);font-weight:800}
+.stack{display:flex;flex-direction:column;gap:8px;min-width:0}
+.box{background:var(--p2);border:1px solid var(--ln);border-radius:17px;padding:12px;min-width:0}
+.t1{font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.t2{font-size:12px;color:var(--mu);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.b{width:36px;height:36px;border-radius:11px;border:1px solid var(--ln);background:var(--p);color:var(--ink);display:grid;place-items:center;padding:0;flex:none}
+.b.on{background:color-mix(in srgb,var(--em) 14%,transparent);border-color:color-mix(in srgb,var(--em) 45%,transparent);color:var(--fg)}
+.b.off{color:var(--mu)}
+.b.warn{background:var(--wbg);border-color:var(--wbd);color:var(--wfg)}
+.b:disabled,.app:disabled{opacity:.4}
+.ring-num:disabled{opacity:1;cursor:default}
+.grp{display:flex;gap:6px;align-items:center;flex:none}
+.dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--em);margin-right:5px;vertical-align:1px}
+.dot.off{background:var(--mu)}.dot.warn{background:var(--wbd)}
+.np{display:flex;gap:10px;align-items:center;min-width:0}
+.np>div:last-child{min-width:0;flex:1}
+.art{width:44px;height:44px;border-radius:13px;display:grid;place-items:center;background:color-mix(in srgb,var(--em) 16%,transparent);color:var(--fg);flex:none;overflow:hidden}
+.art img{width:100%;height:100%;object-fit:cover;display:block}
+.prog{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:8px;align-items:center;margin-top:10px;font-size:11px;color:var(--mu);font-variant-numeric:tabular-nums;min-height:14px}
+.prog i{display:block;height:4px;border-radius:4px;background:var(--tr);overflow:hidden}
+.prog i b{display:block;height:100%;width:0;background:var(--em);border-radius:4px}
+.ctl{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:10px}
+.ring{position:relative;width:84px;height:84px;flex:none}
+.ring svg{display:block;width:100%;height:100%}
+.ring .vt{fill:none;stroke:var(--tr);stroke-width:9}
+.ring .va{fill:none;stroke:var(--em);stroke-width:9;stroke-linecap:round;stroke-dasharray:251.3;transition:stroke-dashoffset .2s}
+.ring-num{position:absolute;inset:12px;border-radius:50%;border:0;background:transparent;color:var(--ink);display:flex;flex-direction:column;align-items:center;justify-content:center;padding:0}
+.ring-num strong{font-size:21px;font-weight:700;line-height:1;font-variant-numeric:tabular-nums}
+.ring-num span{font-size:9px;letter-spacing:1px;color:var(--mu);font-weight:650;margin-top:4px}
+.ring-num span.long{font-size:7.5px;letter-spacing:.3px}
+.ring-num ha-icon.ico{color:var(--mu);margin-top:3px;width:15px;height:15px;--mdc-icon-size:15px}
+.rows{padding:0 12px}
+.row{display:grid;grid-template-columns:34px minmax(0,1fr) auto;gap:10px;align-items:center;padding:11px 0;min-height:60px}
+.ic{width:34px;height:34px;border-radius:11px;color:var(--mu);display:grid;place-items:center;background:var(--c);transition:background .35s,color .35s}
+.ic.warn{background:var(--wbg);color:var(--wfg)}
+.t2.warn{color:var(--wfg)}
+.dev{transition:background .35s,border-color .35s}
+.dev.lit{background:radial-gradient(120% 140% at 0% 0%,var(--g0) 0%,transparent 55%),linear-gradient(135deg,var(--g1),var(--g2));border-color:var(--gb)}
+:host(:not([data-dark])) .dev.lit{box-shadow:inset 0 1px 0 rgba(255,255,255,.4)}
+.dev.lit .ic{background:var(--lit-on);color:#fff}
+.dev.lit .t2{color:var(--gt);padding-left:5px;margin-left:-5px}
+.dev.lit .dot{background:var(--gt);box-shadow:0 0 0 3px color-mix(in srgb,var(--em) 22%,transparent);animation:live 2.4s ease-in-out infinite}
+@keyframes live{50%{box-shadow:0 0 0 6px color-mix(in srgb,var(--em) 0%,transparent)}}
+.dev.lit .b,.dev.lit .app{background:var(--lit-b)}
+.dev.lit .b.on,.dev.lit .app.act{background:var(--lit-on);border-color:var(--lit-on);color:#fff}
+.dev.lit .apps{border-top-color:var(--gb)}
+.apps{display:flex;gap:6px;overflow-x:auto;scroll-snap-type:x proximity;padding:10px 0 11px;scrollbar-width:none;border-top:1px solid var(--ln);overscroll-behavior-x:contain}
+.apps::-webkit-scrollbar{display:none}
+.app{flex:none;scroll-snap-align:start;display:inline-flex;align-items:center;gap:6px;height:34px;padding:0 12px 0 9px;border-radius:999px;border:1px solid var(--ln);background:var(--p);color:var(--ink);font-size:12px;font-weight:600;white-space:nowrap;max-width:200px}
+.app span{overflow:hidden;text-overflow:ellipsis}
+.app ha-icon.ico{color:var(--mu);width:16px;height:16px;--mdc-icon-size:16px}
+.app.act{background:color-mix(in srgb,var(--em) 14%,transparent);border-color:color-mix(in srgb,var(--em) 45%,transparent);color:var(--fg)}
+.app.act ha-icon.ico,.dev.lit .app.act ha-icon.ico{color:inherit}
+.g2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.tile{background:var(--p2);border:1px solid var(--ln);border-radius:15px;padding:11px 8px;text-align:center;min-width:0;color:var(--ink)}
+.tile.span{grid-column:1/-1}
+.tile .ib{width:36px;height:36px;border-radius:11px;margin:0 auto 7px;display:grid;place-items:center;background:var(--c);border:1px solid var(--ln);color:var(--mu)}
+.tile.on .ib{color:var(--fg);background:color-mix(in srgb,var(--em) 14%,transparent);border-color:color-mix(in srgb,var(--em) 45%,transparent)}
+.tile.warn .ib{background:var(--wbg);border-color:var(--wbd);color:var(--wfg)}
+.tile .t1{font-size:13px}.tile .t2{font-size:11px}
+.empty{font-size:13px;color:var(--mu);text-align:center;padding:22px 10px;border:1px dashed var(--ln);border-radius:15px;line-height:1.5}
+.toast{position:fixed;left:50%;bottom:max(16px,env(safe-area-inset-bottom));transform:translateX(-50%);z-index:10000;max-width:min(410px,calc(100vw - 30px));padding:12px 14px;background:#182c24;color:#fff;border-radius:12px;box-shadow:0 10px 30px #0003;font-size:12px;line-height:1.45;pointer-events:none}
+:host([data-dark]) .toast{background:#e0f4e8;color:#182d22}
+@container (max-width:340px){.mf{padding:13px}.b{width:33px;height:33px}.ring{width:76px;height:76px}.ring-num strong{font-size:19px}.grp{gap:5px}.ti{font-size:23px}}
+@container (max-width:300px){.ctl{flex-wrap:wrap;justify-content:center}.row{grid-template-columns:34px minmax(0,1fr)}.row .grp{grid-column:1/-1;justify-content:flex-end}}
+`;
+const POPUP_CSS = PALETTE + COMMON + `
+:host{position:fixed;inset:0;z-index:9999;pointer-events:none;font-family:var(--ha-font-family-body,Roboto,Arial,sans-serif);color:var(--ink)}
+.ov{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:#0009;font-size:14px;pointer-events:auto;
+ padding:max(20px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) max(20px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left))}
+.ov.open{display:flex}
+.dlg{outline:none;width:min(390px,100%);min-width:0;height:min(calc(100vh - 40px),680px);height:min(calc(100dvh - 40px),680px);display:flex;flex-direction:column;background:var(--p);color:var(--ink);border:1px solid var(--ln);border-radius:26px;overflow:hidden;box-shadow:0 18px 60px #0005}
+.ov.wide .dlg{width:min(1120px,100%);height:min(80vh,560px);height:min(80dvh,560px)}
+.dlg.small,.ov.wide .dlg.small{width:min(390px,100%);height:auto;max-height:min(calc(100vh - 32px),680px);max-height:min(calc(100dvh - 32px),680px)}
+.dlg.small .db{flex:0 1 auto}
+.dh{flex:none;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:16px 16px 12px 18px;border-bottom:1px solid var(--ln);background:var(--p)}
+.dh h3{margin:0;font-size:17px;font-weight:600;line-height:1.3;overflow-wrap:anywhere}
+.x{width:40px;height:40px;border-radius:50%;background:var(--p2);border:1px solid var(--ln);color:var(--ink);display:grid;place-items:center;padding:0;flex:none}
+.db{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;padding:14px 18px 18px}
+.ov.wide .cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:4px 18px;align-items:start}
+.sec{font-size:10px;letter-spacing:1.6px;font-weight:750;color:var(--mu);margin:4px 0 8px;text-transform:uppercase;grid-column:1/-1}
+.it{width:100%;display:flex;align-items:center;justify-content:space-between;gap:10px;border:0;border-radius:16px;background:var(--p2);color:var(--ink);padding:13px;margin-bottom:8px;text-align:left;min-width:0}
+.it .l{display:flex;align-items:center;gap:12px;min-width:0}
+.it .l>span{min-width:0;overflow-wrap:anywhere}
+.it .l ha-icon.ico{color:var(--mu)}
+.it.act{box-shadow:inset 0 0 0 2px var(--em)}.it.act ha-icon.ico{color:var(--fg)}
+.it small{display:block;color:var(--mu);font-size:12px;margin-top:3px}
+.it:disabled{opacity:.45}
+.note{font-size:13px;color:var(--mu);line-height:1.55;margin:4px 2px}
+.err{font-size:12px;color:var(--wfg);background:var(--wbg);border-radius:12px;padding:10px 12px;margin:10px 0 0;line-height:1.45}
+.sw{width:44px;height:26px;border-radius:20px;border:0;background:#b9c4bc;padding:3px;display:flex;flex:none}
+.sw:after{content:"";width:20px;height:20px;border-radius:50%;background:#fff;transition:transform .2s}
+.sw.on{background:var(--em)}.sw.on:after{transform:translateX(18px)}
+.sl{display:flex;align-items:center;gap:10px;color:var(--mu);min-height:58px}
+.sl input{flex:1;accent-color:var(--em);min-width:0}
+.sl output{width:44px;text-align:right;font-weight:600;color:var(--ink);font-variant-numeric:tabular-nums}
+.spin{animation:spin .9s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}
+.rc{display:flex;justify-content:center;padding-top:2px}
+.rmt{--rb:#f4f6f4;--rk:#fff;--rkb:#d9e0db;--rink:#18221c;--rring:#e9eeea;--cap:#6d7a72;position:relative;width:min(268px,100%);background:linear-gradient(180deg,var(--rb) 0%,color-mix(in srgb,var(--rb) 90%,#000 10%) 100%);border:1px solid var(--ln);border-radius:46px 46px 52px 52px;padding:14px 18px 18px;display:flex;flex-direction:column;gap:12px;box-shadow:inset 0 1px 0 #fff,inset 0 -10px 24px rgba(0,0,0,.04),0 14px 34px rgba(0,0,0,.10)}
+:host([data-dark]) .rmt{--rb:#1e2220;--rk:#2b302d;--rkb:#3a423e;--rink:#f5f7f4;--rring:#252a27;--cap:#9aa69f;box-shadow:inset 0 1px 0 rgba(255,255,255,.06),0 14px 34px rgba(0,0,0,.45)}
+.rmt:before{content:"";display:block;width:34px;height:4px;border-radius:4px;margin:0 auto -4px;background:var(--rkb)}
+.rled{position:absolute;top:13px;left:50%;width:6px;height:6px;margin-left:-3px;border-radius:50%}
+.rled.flash{background:var(--em);box-shadow:0 0 8px var(--em)}
+.rhalf{display:flex;flex-direction:column;gap:12px;align-items:center}
+.rr{display:flex;justify-content:space-between;align-items:flex-start;width:100%}
+.rr.mid{align-items:center}
+.kc{display:flex;flex-direction:column;align-items:center;gap:5px;font-size:10px;color:var(--cap);font-weight:600;min-width:0}
+.rb{width:46px;height:46px;border-radius:50%;border:1px solid var(--rkb);background:var(--rk);color:var(--rink);display:grid;place-items:center;padding:0;box-shadow:0 2px 0 var(--rkb);transition:transform .08s,box-shadow .08s,background .2s}
+.rb:disabled,.ring2 button:disabled,.rock button:disabled{opacity:.35}
+.rb.pwr{color:#c0392b}:host([data-dark]) .rb.pwr{color:#ff8a7a}
+.rb.pp{width:54px;height:54px;color:var(--em)}:host([data-dark]) .rb.pp{color:#6fe0b0}
+.rb.sent,.rock button.sent{background:color-mix(in srgb,var(--em) 18%,var(--rk))}
+.rb:active:not(:disabled),.rock button:active:not(:disabled){transform:translateY(1px);box-shadow:none}
+.ring2{position:relative;width:176px;height:176px;border-radius:50%;background:var(--rring);border:1px solid var(--rkb);box-shadow:inset 0 2px 8px rgba(0,0,0,.07)}
+.seg4{position:absolute;inset:0;border-radius:50%;pointer-events:none;background:conic-gradient(from var(--a,0deg),color-mix(in srgb,var(--em) 30%,transparent) 0 90deg,transparent 90deg);-webkit-mask:radial-gradient(circle,transparent 44px,#000 45px);mask:radial-gradient(circle,transparent 44px,#000 45px);opacity:0;transition:opacity .25s}
+.seg4.on{opacity:1;transition:none}
+.ring2 button{position:absolute;border:0;background:transparent;color:var(--rink);display:grid;place-items:center;width:52px;height:52px;border-radius:50%;padding:0}
+.ring2 .u{top:2px;left:61px}.ring2 .d{bottom:2px;left:61px}.ring2 .l{left:2px;top:61px}.ring2 .r{right:2px;top:61px}
+.ring2 .o{width:80px;height:80px;left:47px;top:47px;background:var(--rk);border:1px solid var(--rkb);box-shadow:0 3px 0 var(--rkb),0 6px 14px rgba(0,0,0,.08);font-weight:700;font-size:14px;letter-spacing:.5px;transition:transform .08s,box-shadow .08s,background .2s}
+.ring2 .o:active:not(:disabled){transform:translateY(2px);box-shadow:0 1px 0 var(--rkb)}
+.ring2 .o.sent{background:var(--em);color:#fff;border-color:var(--em)}
+.rocks{display:grid;grid-template-columns:54px 1fr 54px;align-items:center;width:100%}
+.rocks .kc{justify-self:center}
+.rock{width:54px;height:114px;border-radius:27px;background:var(--rk);border:1px solid var(--rkb);box-shadow:0 2px 0 var(--rkb);display:flex;flex-direction:column;align-items:center;justify-content:space-between;padding:4px 0;color:var(--rink)}
+.rock button{width:46px;height:46px;border-radius:50%;border:0;background:transparent;color:var(--rink);display:grid;place-items:center;padding:0;transition:background .2s}
+.rock span{font-size:10px;font-weight:750;letter-spacing:1.2px;color:var(--cap)}
+.ov.wide .rmt{width:auto;flex-direction:row;gap:40px;padding:22px 34px;border-radius:40px;align-items:center}
+.ov.wide .rmt:before{display:none}
+.ov.wide .rhalf{width:236px;gap:16px}
+.ov.wide .ring2{width:188px;height:188px}
+.ov.wide .ring2 .u,.ov.wide .ring2 .d{left:67px}.ov.wide .ring2 .l,.ov.wide .ring2 .r{top:67px}
+.ov.wide .ring2 .o{width:84px;height:84px;left:51px;top:51px}
+.ov.wide .seg4{-webkit-mask:radial-gradient(circle,transparent 46px,#000 47px);mask:radial-gradient(circle,transparent 46px,#000 47px)}
+.ov.wide .rock{height:124px}
+`;
+const EDITOR_CSS = `
+:host{display:block;color:var(--primary-text-color,#19221E);font-family:var(--ha-font-family-body,Roboto,Arial,sans-serif)}
+*{box-sizing:border-box}
+.ed{font-size:14px}
+button,input,select{font:inherit;color:inherit}
+.tabs{display:flex;gap:5px;overflow-x:auto;padding-bottom:14px;border-bottom:1px solid var(--divider-color,#E1E5E1)}
+.tab{border:0;background:none;color:var(--secondary-text-color,#68716C);border-radius:13px;padding:10px 13px;white-space:nowrap;cursor:pointer}
+.tab[aria-pressed="true"]{color:var(--primary-text-color,#19221E);background:var(--secondary-background-color,#F1F3EF);font-weight:650}
+.heading{font-size:21px;font-weight:500;margin:25px 0 9px}
+.desc{color:var(--secondary-text-color,#68716C);font-size:13px;line-height:1.5;margin-bottom:20px}
+.field{display:block;margin:18px 0}
+.label{font-size:14px;margin-bottom:10px}
+.input{display:block;width:100%;background:var(--secondary-background-color,#F1F3EF);color:var(--primary-text-color,#19221E);border:0;border-bottom:1px solid var(--divider-color,#E1E5E1);padding:14px 13px;min-height:50px;border-radius:11px 11px 0 0}
+.row{border-bottom:1px solid var(--divider-color,#E1E5E1);padding:13px 0;display:flex;align-items:center;justify-content:space-between;gap:15px}
+.row label{flex:1;min-width:0}
+input[type=checkbox]{width:18px;height:18px;accent-color:var(--primary-color,#064E3B);flex:none}
+.muted{font-size:12px;line-height:1.5;color:var(--secondary-text-color,#68716C)}
+.tiny{font-size:11px;color:var(--secondary-text-color,#68716C);margin:9px 0;line-height:1.5}
+.action{background:var(--secondary-background-color,#F1F3EF);border:1px solid var(--divider-color,#E1E5E1);color:var(--primary-text-color,#19221E);padding:5px 9px;min-width:34px;border-radius:10px;cursor:pointer}
+.action:disabled{opacity:.45;cursor:not-allowed}
+.action.wide{padding:9px 12px;margin-top:8px}
+.mod{border-bottom:1px solid var(--divider-color,#E1E5E1);padding:16px 0}
+.mh{display:flex;align-items:center;gap:10px}
+.mh .nm{flex:1;min-width:0;font-weight:600;font-size:15px}
+.ctl{display:flex;gap:6px;flex:none}
+.mb{margin-top:10px}
+.chk{display:flex;align-items:center;gap:10px;margin:8px 0;font-size:13px}
+.item{background:var(--secondary-background-color,#F1F3EF);border-radius:12px;padding:10px;margin-top:8px}
+.item .top{display:flex;gap:8px;align-items:center}
+.item .top input{flex:1;min-width:0;background:var(--card-background-color,#fff);border:0;border-bottom:1px solid var(--divider-color,#E1E5E1);border-radius:8px 8px 0 0;padding:10px}
+.item .sub{margin-top:8px}
+ha-selector{display:block;width:100%}
+.diag{display:grid;gap:8px;margin-top:8px}
+.diag-row{background:var(--secondary-background-color,#F1F3EF);border-radius:12px;padding:10px 12px}
+.dn{font-size:13px;font-weight:600}.ds{font-size:12px;color:var(--secondary-text-color,#68716C);margin-top:2px}.df{font-size:12px;margin-top:6px;line-height:1.7}
+.y{color:var(--primary-color,#0a7156);font-weight:650}.n{color:var(--warning-color,#b07a00);font-weight:650}
+`;
+
+/* ------------------------------------------------------------------ card */
 class MediaFusionCard extends HTMLElement {
   static getConfigElement() { return document.createElement(EDITOR_TAG); }
-  static getStubConfig() { return {...DEFAULT, scripts:[]}; }
+  static getStubConfig() { return { show_eyebrow: true, show_title: true }; }
   constructor() {
-    super(); this.attachShadow({mode:"open"}); this._config=normalize({});
-    this._busy=new Set(); this._editingVolume=false; this._modalMode=null;
+    super();
+    this.attachShadow({ mode: "open" });
+    this._config = normalize({}); this._busy = new Set(); this._sig = ""; this._pop = null;
+    this.shadowRoot.addEventListener("click", e => this._onClick(e));
   }
   setConfig(config) {
-    if (config?.type && config.type!==`custom:${CARD_TAG}`) throw Error("Tipo card non valido");
-    this._config=normalize(config);
-    for (const [field,domain] of [["tv_on_script","script"],["tv_entity","media_player"],["streaming_entity","media_player"],["audio_entity","media_player"],["light_entity","light"],["tv_remote","remote"],["streaming_remote","remote"],["tv_off_script","script"]]) {
-      const v=this._config[field]; if (v && !entityValid(v,domain)) throw Error(`Entità non valida: ${field}`);
+    if (config?.type && config.type !== `custom:${CARD_TAG}`) throw new Error("Invalid card type");
+    const c = normalize(config);
+    for (const [f, d] of [["tv_entity", "media_player"], ["streaming_entity", "media_player"], ["audio_entity", "media_player"], ["light_entity", "light"], ["tv_remote", "remote"], ["streaming_remote", "remote"], ["tv_on_script", "script"], ["tv_off_script", "script"]]) {
+      if (c[f] && !entityValid(c[f], d)) throw new Error(`${tr(pickLang(c.language), "invalid")}: ${f}`);
     }
-    for(const s of this._config.scripts) if(s.entity_id && !entityValid(s.entity_id,"script")) throw Error("Entità script non valida");
-    if(this.isConnected) this._render();
+    this._config = c; this._sig = ""; this._lastVol = NaN;
+    if (this.isConnected) this._render(true);
   }
-  set hass(hass){this._hass=hass;if(this.isConnected&&this._rendered)this._update();}
-  connectedCallback(){this._render();}
-  disconnectedCallback(){this._destroyPortal();}
-  getCardSize(){return 7;}
-  getGridOptions(){return {columns:12,min_columns:6,rows:8,min_rows:3};}
-  _q(id){return this.shadowRoot.getElementById(id);}
-  _state(field){const id=this._config[field];return id && this._hass?.states ? this._hass.states[id] : undefined;}
-  _stateById(id){return this._hass?.states?.[id];}
-  _setText(id,v){const el=this._q(id);if(el)el.textContent=v;}
-  _render(){
-    this.shadowRoot.innerHTML=`<style>${BASE_CSS}${EXTRA_CSS}</style>${ICONS}${CARD_HTML}<div id="feedback" aria-live="polite" class="feedback" hidden></div>`;
-    this._rendered=true;
-    this.shadowRoot.addEventListener("click",this._onClickBound??=(event=>this._onClick(event)));
-    this.shadowRoot.addEventListener("input",this._onInputBound??=(event=>this._onInput(event)));
-    this.shadowRoot.addEventListener("change",this._onChangeBound??=(event=>this._onChange(event)));
-    this._scriptsHash=null; this._ensurePortal(); this._update();
+  set hass(h) { this._hass = h; if (this.isConnected) this._render(false); }
+  get hass() { return this._hass; }
+  connectedCallback() { this._render(true); }
+  disconnectedCallback() { this._closePop(); this._portal?.remove(); this._portal = null; clearTimeout(this._toastT); clearInterval(this._tick); this._tick = null; }
+  getCardSize() { return 6; }
+  getGridOptions() { return { columns: 12, min_columns: 6, rows: "auto", min_rows: 2 }; }
+
+  get _l() { return pickLang(this._config.language, this._hass); }
+  _t(k, ...a) { return tr(this._l, k, ...a); }
+  _st(id) { return id ? this._hass?.states?.[id] : undefined; }
+  _s(field) { return this._st(this._config[field]); }
+  _dark() {
+    const t = this._config.theme;
+    if (t === "dark") return true;
+    if (t === "light") return false;
+    if (typeof this._hass?.themes?.darkMode === "boolean") return this._hass.themes.darkMode;
+    return typeof window.matchMedia === "function" && window.matchMedia("(prefers-color-scheme: dark)").matches;
   }
-  _applyTheme(){
-    let dark = this._config.theme==="dark";
-    if(this._config.theme==="auto"){
-      dark = typeof this._hass?.themes?.darkMode==="boolean" ? this._hass.themes.darkMode :
-        (typeof window.matchMedia==="function" ? window.matchMedia("(prefers-color-scheme: dark)").matches : false);
+  _has(k) {
+    const c = this._config;
+    if (!c[MOD_FLAG[k]]) return false;
+    if (k === "tv") return entityValid(c.tv_entity, "media_player");
+    if (k === "streaming") return entityValid(c.streaming_entity, "media_player");
+    if (k === "light") return entityValid(c.light_entity, "light");
+    return c.scripts.some(s => entityValid(s.entity_id, "script"));
+  }
+  _hasPanel() { return this._config.show_audio && entityValid(this._config.audio_entity, "media_player"); }
+  _target() {
+    const t = this._config.remote_target;
+    if (t === "tv" || t === "streaming") return t;
+    return this._has("streaming") && isOn(this._s("streaming_entity")) ? "streaming" : "tv";
+  }
+
+  /* ---------- render ---------- */
+  _render(force) {
+    if (!this.shadowRoot) return;
+    const dark = this._dark();
+    this.toggleAttribute("data-dark", dark);
+    this._portal?.toggleAttribute("data-dark", dark);
+    const sig = JSON.stringify([this._l, dark, this._config, this._data(), this._pendVol?.value ?? null]);
+    if (!force && sig === this._sig) return;
+    this._sig = sig;
+    const strip = this.shadowRoot.querySelector(".apps"), sl = strip ? strip.scrollLeft : 0;
+    const focusKey = this.shadowRoot.activeElement?.dataset?.fk;
+    if (!this._root) {
+      this.shadowRoot.innerHTML = `<style>${CARD_CSS}</style><div class="wrap"><div class="mf"></div></div><div class="toast" role="status" aria-live="polite" hidden></div>`;
+      this._root = this.shadowRoot.querySelector(".mf");
     }
-    this.toggleAttribute("data-dark",!!dark);
-    this._portal?.toggleAttribute("data-dark",!!dark);
+    this._root.innerHTML = this._html();
+    const ns = this.shadowRoot.querySelector(".apps");
+    if (ns) { ns.scrollLeft = sl; if (!this._scrolled) { const a = ns.querySelector(".act"); if (a && a.offsetLeft > ns.clientWidth - 40) ns.scrollLeft = a.offsetLeft - 8; this._scrolled = true; } }
+    if (focusKey) this.shadowRoot.querySelector(`[data-fk="${CSS.escape(focusKey)}"]`)?.focus({ preventScroll: true });
+    this._artwork();
+    this._ticker();
+    this._refreshPop();
   }
-  _update(){
-    if(!this._rendered)return;
-    this._applyTheme();
-    const c=this._config;
-    const head=this._q("cardHeader");
-    head.hidden=!c.show_title&&!c.show_eyebrow;
-    const eyebrow=head.querySelector(".micro");if(eyebrow)eyebrow.hidden=!c.show_eyebrow;
-    this._q("viewTitle").hidden=!c.show_title;
-    this._q("viewTitle").innerHTML=`${escapeHtml(String(c.title||"Media Center").trim().replace(/\.+$/, ""))}<b class="dot">.</b>`;
-    this._q("viewSubtitle").hidden=true;
-    this._q("sections").classList.toggle("compact-mode",c.compact_mode===true);
-    const visibility={samsung:"show_tv",fire:"show_streaming",alexa:"show_audio",ambilight:"show_light",scripts:"show_scripts"};
-    for(const [section,prop] of Object.entries(visibility)) {
-      const el=this.shadowRoot.querySelector(`[data-section="${section}"]`);
-      if(el)el.hidden=!c[prop];
+  // The subset of Home Assistant state the card shows: re-rendering only when it changes keeps the card still.
+  _data() {
+    const pick = s => s ? [s.state, s.attributes?.friendly_name, s.attributes?.source, s.attributes?.app_id, s.attributes?.app_name, s.attributes?.media_title, s.attributes?.media_artist, s.attributes?.volume_level, s.attributes?.is_volume_muted, s.attributes?.supported_features, s.attributes?.brightness, s.attributes?.rgb_color, s.attributes?.icon, s.attributes?.media_duration, s.attributes?.media_position, s.attributes?.media_position_updated_at, s.attributes?.entity_picture] : null;
+    const c = this._config;
+    return [pick(this._s("tv_entity")), pick(this._s("streaming_entity")), pick(this._s("audio_entity")), pick(this._s("light_entity")), c.scripts.map(s => this._st(s.entity_id)?.state ?? null)];
+  }
+  _html() {
+    const c = this._config, parts = [];
+    let h = "";
+    if (c.show_eyebrow || c.show_title) {
+      const title = String(c.title || DEFAULT.title).replace(/\.+$/, "");
+      h += `<div class="hd">${c.show_eyebrow ? `<div class="ey">${esc(c.eyebrow || DEFAULT.eyebrow)}</div>` : ""}${c.show_title ? `<div class="ti">${esc(title)}<b>.</b></div>` : ""}</div>`;
     }
-    this._updateSamsung(); this._updateFire(); this._updateAlexa();this._updateAmbient();this._updateScripts();
-  }
-  _updateSamsung(){
-    const c=this._config,s=this._state("tv_entity"),available=validState(s),on=available&&isOn(s);
-    const canWake=entityValid(c.tv_on_script,"script"),canOff=entityValid(c.tv_off_script,"script");
-    const node=this._q("samsung");node.classList.toggle("tv-off",!on);node.classList.toggle("unavailable",!available);
-    const tone=!c.tv_entity?"":!available?"warn":on?"on":"";
-    const badge=this._q("tvState");badge.className="badge"+(tone?` ${tone}`:"");
-    badge.querySelector("span").textContent=!c.tv_entity?"Da configurare":!available?"Non raggiungibile":on?"Accesa":"Spenta";
-    this._q("tvCircle").className="ico-circle"+(tone?` ${tone}`:"");
-    this._setText("tvName",shownName(c.tv_name,s,"TV"));
-    const heading=this._q("tvHero");heading.textContent=c.tv_headline;heading.hidden=!c.tv_headline;
-    const input=this._q("tvInput");input.hidden=!on;input.textContent=`Sorgente · ${short(s?.attributes?.source,"—")}`;
-    const power=this._q("tvPower");
-    power.className="action-pill power "+(!available?(canWake?"pw-warn":"pw-off"):on?"pw-on":"pw-off");
-    power.disabled=(!available&&!canWake)||this._busy.has("tvPower");
-    let msg="";
-    if(c.tv_entity){
-      if(!available)msg=canWake?"TV non raggiungibile: il pulsante power usa lo script di accensione.":"TV non raggiungibile. Configura uno script di accensione nell'editor, scheda Azioni.";
-      else if(!on&&!canWake&&!supports(s,MEDIA_TURN_ON))msg="Questa TV non si accende da sola. Configura uno script di accensione nell'editor, scheda Azioni.";
-      else if(on&&!canOff&&!supports(s,MEDIA_TURN_OFF))msg="Questa TV non si spegne da sola. Configura uno script di spegnimento nell'editor, scheda Azioni.";
+    if (this._hasPanel()) parts.push(this._panel());
+    let tiles = [];
+    const flush = () => { if (tiles.length) { parts.push(`<div class="g2">${tiles.map(k => k === "light" ? this._lightTile(tiles.length === 1) : this._scriptTile(tiles.length === 1)).join("")}</div>`); tiles = []; } };
+    for (const k of c.order) {
+      if (!this._has(k)) continue;
+      if (k === "light" || k === "scripts") tiles.push(k);
+      else { flush(); parts.push(k === "tv" ? this._tv() : this._streaming()); }
     }
-    const hint=this._q("tvHint");hint.hidden=!msg;hint.textContent=msg;
-    const buttons=this.shadowRoot.querySelectorAll('[data-open="sources"],[data-open="remote-samsung"]');
-    buttons.forEach(el=>el.disabled=!available);
+    flush();
+    return h + `<div class="stack">${parts.length ? parts.join("") : `<div class="empty">${esc(this._t("empty"))}</div>`}</div>`;
   }
-  _updateFire(){
-    const c=this._config,s=this._state("streaming_entity"),available=validState(s),on=available&&isOn(s);
-    this._setText("fireName",shownName(c.streaming_name,s,"Lettore streaming"));
-    this._q("fireIcon").setAttribute("icon",stateIcon(s,"mdi:television-play"));
-    const app=short(s?.attributes?.app_name,"");
-    const label=!c.streaming_entity?"Da configurare":!available?"Non disponibile":s.state==="playing"?"In riproduzione":s.state==="paused"?"In pausa":on?"Acceso":"Spento";
-    this._setText("fireMeta",available&&on&&app?`${label} · ${app}`:label);
-    this._q("fireCircle").className="ico-circle"+(!c.streaming_entity?"":!available?" warn":on?" on":"");
-    const power=this._q("firePower");power.disabled=!available;power.className="icon-btn "+(on?"pw-on":"pw-off");
-    power.setAttribute("aria-label",on?"Spegni lettore streaming":"Accendi lettore streaming");
-    const play=this._q("firePlay");play.hidden=!on;play.disabled=!available;play.innerHTML=ico(s?.state==="playing"?"pause":"play");
-    this.shadowRoot.querySelectorAll('[data-open="fireapps"],[data-open="remote-fire"]').forEach(b=>b.disabled=!available);
+  _volInfo() {
+    const c = this._config, s = this._s("audio_entity"), ok = validState(s);
+    const lvl = s?.attributes?.volume_level, hasVol = ok && typeof lvl === "number" && Number.isFinite(lvl);
+    const canSet = ok && supports(s, F.VOLUME_SET);
+    if (!Number.isFinite(this._lastVol)) this._lastVol = this._loadVol();
+    let v = hasVol ? Math.round(clamp(lvl * 100, 0, 100)) : null;
+    const p = this._pendVol;
+    if (p && (Date.now() > p.until || !ok || (v !== null && Math.abs(v - p.value) <= 1))) this._pendVol = null;
+    if (this._pendVol) v = this._pendVol.value;
+    else if (v === null && canSet && Number.isFinite(this._lastVol)) v = this._lastVol;
+    return { s, ok, v, canSet, muted: s?.attributes?.is_volume_muted === true, canMute: ok && supports(s, F.VOLUME_MUTE) && typeof s?.attributes?.is_volume_muted === "boolean" };
   }
-  _updateAlexa(){
-    const c=this._config,s=this._state("audio_entity"),available=validState(s);
-    const n=this.shadowRoot.querySelector(".alexa .tag");
-    this._setText("audioName",shownName(c.audio_name,s,"Home Theater"));
-    if(n)n.textContent=!c.audio_entity?"Da configurare":!available?"Non disponibile":"Media player";
-    this._q("audioCircle").className="ico-circle"+(!c.audio_entity?"":!available?" warn":" on");
-    const title=this.shadowRoot.querySelector(".track-title");
-    if(title)title.textContent=short(s?.attributes?.media_title,"Riproduzione");
-    this._setText("trackMeta",!available?"Non disponibile":short(s?.attributes?.media_artist,s?.state==="playing"?"Riproduzione attiva":"Controlli multimediali"));
-    const hasVol=available&&Number.isFinite(Number(s?.attributes?.volume_level))&&s?.attributes?.volume_level!==null&&s?.attributes?.volume_level!==undefined;
-    const canSet=available&&supports(s,MEDIA_VOLUME_SET),ctl=hasVol||canSet;
-    if(!Number.isFinite(this._lastSetVolume))this._lastSetVolume=this._loadVolume();
-    const value=hasVol?Math.round(clamp(Number(s.attributes.volume_level)*100,0,100)):0;
-    if(this._pendingVolume && (!available || (hasVol&&Math.abs(value-this._pendingVolume.value)<=1) || Date.now()>this._pendingVolume.until))this._pendingVolume=null;
-    const known=hasVol||(canSet&&Number.isFinite(this._lastSetVolume));
-    const presented=this._pendingVolume?.value ?? (hasVol?value:(known?this._lastSetVolume:0));
-    const muted=s?.attributes?.is_volume_muted===true;
-    this._q("volGroup").hidden=!ctl;this._q("volLine").hidden=!ctl;
-    this._q("noVol").hidden=ctl||!c.audio_entity;
-    this._setText("noVolTitle",!available?"Dispositivo non disponibile":"Volume non disponibile");
-    this._setText("noVolText",!available?"Controlla che il dispositivo sia acceso e raggiungibile da Home Assistant.":"Questa entità non permette di regolare il volume. Scegli un'altra entità.");
-    if(!this._editingVolume){this._q("volume").value=String(presented);this._updateVolVisual(known?presented:null,muted);}
-    this._q("volMinus").disabled=!hasVol;
-    this._q("volPlus").disabled=!hasVol;
-    this._q("volMute").disabled=!available||typeof s?.attributes?.is_volume_muted!=="boolean";
-    this._q("volume").disabled=!ctl;
-    this._q("alexaPlay").disabled=!available;
-    this._q("alexaPlay").innerHTML=ico(s?.state==="playing"?"pause":"play");
-    this._q("alexaPrev").hidden=!(available&&supports(s,MEDIA_PREVIOUS_TRACK));
-    this._q("alexaNext").hidden=!(available&&supports(s,MEDIA_NEXT_TRACK));
-    this._updateArtwork();
+  _panel() {
+    const c = this._config, { s, ok, v, canSet, muted, canMute } = this._volInfo();
+    const playing = s?.state === "playing";
+    const title = ok ? short(s.attributes?.media_title, this._t("nothing")) : this._t("unavailable");
+    const name = short(c.audio_name, short(s?.attributes?.friendly_name, this._t("audio")));
+    const sub = ok ? [short(s.attributes?.media_artist, ""), name].filter(Boolean).join(" · ") : name;
+    const off = 251.3 * (1 - ((muted || v === null) ? 0 : v) / 100);
+    const dis = ok ? "" : "disabled";
+    const prog = c.show_progress ? `<div class="prog" data-prog><span data-pos>—:—</span><i><b></b></i><span data-dur>—:—</span></div>` : "";
+    return `<div class="box">
+      <div class="np"><div class="art" data-art${c.artwork_source === "none" ? " hidden" : ""}>${ico(s?.attributes?.icon && iconOk(s.attributes.icon) ? s.attributes.icon : "mdi:volume-high")}</div><div><div class="t1">${esc(title)}</div><div class="t2">${esc(sub)}</div></div></div>
+      ${prog}
+      <div class="ctl">
+        <div class="grp">
+          <button class="b" data-a="prev" data-fk="prev" aria-label="${esc(this._t("prev"))}" ${ok && supports(s, F.PREVIOUS) ? "" : "disabled"}>${ico("mdi:skip-previous")}</button>
+          <button class="b on" data-a="play" data-fk="play" aria-label="${esc(this._t("playpause"))}" ${dis}>${ico(playing ? "mdi:pause" : "mdi:play")}</button>
+          <button class="b" data-a="next" data-fk="next" aria-label="${esc(this._t("next"))}" ${ok && supports(s, F.NEXT) ? "" : "disabled"}>${ico("mdi:skip-next")}</button>
+        </div>
+        <div class="grp">
+          <button class="b" data-a="vd" data-fk="vd" aria-label="${esc(this._t("vol_down"))}" ${canSet ? "" : "disabled"}>${ico("mdi:minus")}</button>
+          <div class="ring"><svg viewBox="0 0 96 96" aria-hidden="true"><circle class="vt" cx="48" cy="48" r="40"></circle><circle class="va" cx="48" cy="48" r="40" transform="rotate(-90 48 48)" style="stroke-dashoffset:${off.toFixed(1)}"></circle></svg>
+            <button class="ring-num" data-a="mute" data-fk="mute" aria-label="${esc(this._t("mute"))}" aria-pressed="${muted}" ${canMute ? "" : "disabled"}><strong>${v === null ? "—" : v}</strong>${muted ? ico("mdi:volume-off") : `<span${this._t("volume").length > 7 ? ' class="long"' : ""}>${esc(this._t("volume"))}</span>`}</button></div>
+          <button class="b" data-a="vu" data-fk="vu" aria-label="${esc(this._t("vol_up"))}" ${canSet ? "" : "disabled"}>${ico("mdi:plus")}</button>
+        </div>
+      </div></div>`;
   }
-  _updateArtwork(){
-    const box=this.shadowRoot.querySelector(".alexa .art");if(!box)return;
-    const kind=this._config.artwork_source;box.hidden=kind==="none";
-    if(kind==="none")return;
-    const entity=kind==="streaming"?this._state("streaming_entity"):this._state("audio_entity");
-    const url=validState(entity)?entity?.attributes?.entity_picture:null;
-    const valid=typeof url==="string" && url.startsWith("/") && !url.startsWith("//") && !url.includes("\\") && !/[\x00-\x1f]/.test(url);
-    const fallback=box.querySelector("ha-icon");
-    let img=box.querySelector("img");
-    if(!valid){if(img)img.remove();if(fallback)fallback.hidden=false;return;}
-    if(!img){img=document.createElement("img");img.alt="Copertina fornita dal media player";img.loading="lazy";img.referrerPolicy="same-origin";img.addEventListener("load",()=>{img.hidden=false;if(fallback)fallback.hidden=true;});img.addEventListener("error",()=>{img.hidden=true;if(fallback)fallback.hidden=false;});box.appendChild(img);}
-    if(img.getAttribute("src")!==url){img.hidden=true;if(fallback)fallback.hidden=false;img.setAttribute("src",url);}
+  _tv() {
+    const c = this._config, s = this._s("tv_entity"), ok = validState(s), on = ok && isOn(s);
+    const canWake = entityValid(c.tv_on_script, "script");
+    const name = short(c.tv_name, short(s?.attributes?.friendly_name, this._t("tv")));
+    const meta = !ok ? `<span class="dot warn"></span>${esc(this._t("unreachable"))}` : on ? `<span class="dot"></span>${esc([this._t("on_f"), short(s.attributes?.source, "")].filter(Boolean).join(" · "))}` : `<span class="dot off"></span>${esc(this._t("off_f"))}`;
+    const pw = !ok ? (canWake ? "warn" : "off") : on ? "on" : "off";
+    const lit = on && c.highlight_on ? " lit" : "";
+    return `<div class="box rows dev${lit}"><div class="row"><span class="ic${ok ? "" : " warn"}">${ico("mdi:television")}</span><div style="min-width:0"><div class="t1">${esc(name)}</div><div class="t2${ok ? "" : " warn"}">${meta}</div></div><div class="grp">
+      <button class="b" data-pop="sources" data-fk="tvsrc" aria-label="${esc(this._t("tv_sources"))}" ${on && supports(s, F.SELECT_SOURCE) ? "" : "disabled"}>${ico("mdi:format-list-bulleted")}</button>
+      <button class="b" data-pop="remote" data-fk="remote" aria-label="${esc(this._t("remote"))}">${ico("mdi:remote-tv")}</button>
+      <button class="b ${pw}" data-a="tvpower" data-fk="tvpower" aria-label="${esc(this._t("power_tv"))}" ${ok || canWake ? "" : "disabled"}>${ico("mdi:power")}</button>
+    </div></div></div>`;
   }
-  _updateVolVisual(value,muted=false){
-    const v=value===null?null:Math.round(clamp(value,0,100));
-    const shown=v===null||muted?0:v;
-    this._q("volArc").style.strokeDashoffset=String(Math.round(251.3*(1-shown/100)*10)/10);
-    this._q("volume").style.setProperty("--fill",`${v===null?0:v}%`);
-    this._setText("volNumber",v===null?"—":String(v));
-    this._setText("volOut",v===null?"—":`${v}%`);
-    this._q("volMute").style.color=muted?"var(--emerald)":"";
-    this._q("volMute").setAttribute("aria-pressed",String(muted));
+  // The open app: matched by app ID first, then by name.
+  _activeApp(s) {
+    if (!isOn(s)) return null;
+    const at = s.attributes || {}, apps = this._config.apps;
+    return apps.find(a => a.app_id && (at.app_id === a.app_id || at.source === a.app_id)) || apps.find(a => a.name && (at.app_name === a.name || at.source === a.name)) || null;
   }
-  _updateAmbient(){
-    const c=this._config,s=this._state("light_entity"),available=validState(s),on=available&&s.state==="on";
-    this._setText("lightName",shownName(c.light_name,s,"Luci LED TV"));
-    this._q("lightIcon").setAttribute("icon",stateIcon(s,"mdi:led-strip-variant"));
-    const btn=this._q("ambientSwitch");btn.classList.toggle("on",on);
-    btn.setAttribute("aria-checked",String(on)); btn.disabled=!available;
-    const canBright=available&&on&&typeof s.attributes?.brightness==="number";
-    let bv=canBright?Math.round(s.attributes.brightness/255*100):null;
-    const pb=this._pendingBright;if(pb&&(Date.now()>pb.until||!canBright))this._pendingBright=null;else if(pb&&canBright&&Math.abs(bv-pb.value)<=2)this._pendingBright=null;else if(pb)bv=pb.value;
-    this._setText("ambientLabel",!c.light_entity?"Da configurare":!available?"Non disponibile":on?(bv!==null?`Illuminazione · Accesa ${bv}%`:"Illuminazione · Accesa"):"Illuminazione · Spenta");
-    const circle=this._q("lightCircle");
-    circle.className="ico-circle"+(!c.light_entity?"":!available?" warn":on?" on":"");
-    const rgb=s?.attributes?.rgb_color;
-    const okRgb=on&&Array.isArray(rgb)&&rgb.length===3&&rgb.every(x=>Number.isInteger(x)&&x>=0&&x<=255);
-    circle.style.background=okRgb?`rgb(${rgb[0]},${rgb[1]},${rgb[2]})`:"";
-    circle.style.color=okRgb?((rgb[0]*299+rgb[1]*587+rgb[2]*114)/1000>150?"#18221c":"#ffffff"):"";
-    circle.style.boxShadow=okRgb?"none":"";
-    const bright=this._q("brightness");
-    bright.disabled=!canBright;
-    if(!this._editingBrightness){
-      const v=canBright?bv:0;
-      bright.value=String(v);bright.style.setProperty("--fill",`${v}%`);
-      this._setText("brightOut",canBright?`${v}%`:"—");
+  _streaming() {
+    const c = this._config, s = this._s("streaming_entity"), ok = validState(s), on = ok && isOn(s);
+    const name = short(c.streaming_name, short(s?.attributes?.friendly_name, this._t("streaming")));
+    const active = on ? this._activeApp(s) : null;
+    const appName = active ? short(active.name, active.app_id) : short(s?.attributes?.app_name, short(s?.attributes?.source, ""));
+    const st = s?.state === "playing" ? this._t("playing") : s?.state === "paused" ? this._t("paused") : this._t("on_m");
+    const meta = !ok ? `<span class="dot warn"></span>${esc(this._t("unavailable"))}` : on ? `<span class="dot"></span>${esc([st, appName].filter(Boolean).join(" · "))}` : `<span class="dot off"></span>${esc(this._t("off_m"))}`;
+    const lit = on && c.highlight_on ? " lit" : "";
+    const apps = c.show_apps && c.apps.length ? `<div class="apps" role="group" aria-label="${esc(this._t("apps"))}">${c.apps.map((a, i) => `<button class="app${active === a ? " act" : ""}" data-app="${i}" data-fk="app${i}" ${on ? "" : "disabled"}>${ico(a.icon || "mdi:application-outline")}<span>${esc(short(a.name, a.app_id || "App"))}</span></button>`).join("")}</div>` : "";
+    return `<div class="box rows dev${lit}"><div class="row"><span class="ic${ok ? "" : " warn"}">${ico(iconOk(s?.attributes?.icon) ? s.attributes.icon : "mdi:television-play")}</span><div style="min-width:0"><div class="t1">${esc(name)}</div><div class="t2${ok ? "" : " warn"}">${meta}</div></div><div class="grp">
+      <button class="b" data-pop="apps" data-fk="apps" aria-label="${esc(this._t("all_apps"))}" ${on ? "" : "disabled"}>${ico("mdi:apps")}</button>
+      <button class="b" data-a="stplay" data-fk="stplay" aria-label="${esc(this._t("playpause"))}" ${on ? "" : "disabled"}>${ico(s?.state === "playing" ? "mdi:pause" : "mdi:play")}</button>
+      <button class="b ${on ? "on" : "off"}" data-a="stpower" data-fk="stpower" aria-label="${esc(this._t("power_st"))}" ${ok ? "" : "disabled"}>${ico("mdi:power")}</button>
+    </div></div>${apps}</div>`;
+  }
+  _lightInfo() {
+    const s = this._s("light_entity"), ok = validState(s), on = ok && s.state === "on";
+    const canB = on && typeof s.attributes?.brightness === "number";
+    let b = canB ? Math.round(s.attributes.brightness / 255 * 100) : null;
+    const p = this._pendBri;
+    if (p && (Date.now() > p.until || !canB || Math.abs(b - p.value) <= 2)) this._pendBri = null;
+    if (this._pendBri) b = this._pendBri.value;
+    return { s, ok, on, b, dimmable: ok && (typeof s.attributes?.brightness === "number" || (Array.isArray(s.attributes?.supported_color_modes) && s.attributes.supported_color_modes.some(m => m !== "onoff"))) };
+  }
+  _lightTile(span) {
+    const c = this._config, { s, ok, on, b } = this._lightInfo();
+    const name = short(c.light_name, short(s?.attributes?.friendly_name, this._t("light")));
+    const rgb = s?.attributes?.rgb_color, okRgb = on && Array.isArray(rgb) && rgb.length === 3 && rgb.every(x => Number.isInteger(x) && x >= 0 && x <= 255);
+    const style = okRgb ? ` style="background:rgb(${rgb.join(",")});border-color:transparent;color:${(rgb[0] * 299 + rgb[1] * 587 + rgb[2] * 114) / 1000 > 150 ? "#18221c" : "#fff"}"` : "";
+    const sub = !ok ? this._t("unavailable") : on ? (b !== null ? `${this._t("lights_on")} · ${b}%` : this._t("lights_on")) : this._t("lights_off");
+    return `<button class="tile${on ? " on" : ""}${ok ? "" : " warn"}${span ? " span" : ""}" data-pop="light" data-fk="light"><div class="ib"${style}>${ico(iconOk(s?.attributes?.icon) ? s.attributes.icon : "mdi:led-strip-variant")}</div><div class="t1">${esc(name)}</div><div class="t2">${esc(sub)}</div></button>`;
+  }
+  _scriptList() { return this._config.scripts.filter(s => entityValid(s.entity_id, "script")); }
+  _scriptTile(span) {
+    const n = this._scriptList().length, run = this._scriptList().some(s => this._st(s.entity_id)?.state === "on");
+    return `<button class="tile on${span ? " span" : ""}" data-pop="scripts" data-fk="scripts"><div class="ib">${ico(run ? "mdi:loading" : "mdi:lightning-bolt-outline")}</div><div class="t1">${esc(this._t("scripts"))}</div><div class="t2">${esc(this._t("actions", n))}</div></button>`;
+  }
+  _artwork() {
+    const box = this.shadowRoot.querySelector("[data-art]"); if (!box || box.hidden) return;
+    const e = this._config.artwork_source === "streaming" ? this._s("streaming_entity") : this._s("audio_entity");
+    const url = validState(e) ? e.attributes?.entity_picture : null;
+    const ok = typeof url === "string" && url.startsWith("/") && !url.startsWith("//") && !url.includes("\\") && !/[\x00-\x1f]/.test(url);
+    if (!ok) return;
+    const img = document.createElement("img");
+    img.alt = ""; img.loading = "lazy"; img.referrerPolicy = "same-origin"; img.hidden = true;
+    img.addEventListener("load", () => { img.hidden = false; box.querySelector("ha-icon")?.setAttribute("hidden", ""); });
+    img.addEventListener("error", () => img.remove());
+    img.src = url; box.appendChild(img);
+  }
+  // Progress bar: updated every second without re-rendering the card.
+  _ticker() {
+    const upd = () => {
+      const el = this.shadowRoot?.querySelector("[data-prog]"); if (!el) return;
+      const s = this._s("audio_entity"), a = s?.attributes || {};
+      const dur = Number(a.media_duration), pos0 = Number(a.media_position);
+      if (!validState(s) || !Number.isFinite(dur) || dur <= 0 || !Number.isFinite(pos0)) { el.querySelector("[data-pos]").textContent = "—:—"; el.querySelector("[data-dur]").textContent = "—:—"; el.querySelector("b").style.width = "0%"; return; }
+      let pos = pos0;
+      const at = Date.parse(a.media_position_updated_at);
+      if (s.state === "playing" && Number.isFinite(at)) pos += (Date.now() - at) / 1000;
+      pos = clamp(pos, 0, dur);
+      el.querySelector("[data-pos]").textContent = fmtTime(pos); el.querySelector("[data-dur]").textContent = fmtTime(dur);
+      el.querySelector("b").style.width = `${(pos / dur * 100).toFixed(2)}%`;
+    };
+    upd();
+    if (!this._tick) this._tick = setInterval(upd, 1000);
+  }
+
+  /* ---------- actions ---------- */
+  async _call(domain, service, entity, data = {}, key = "", dom = domain) {
+    if (!this._hass?.callService || !entityValid(entity, dom)) { this._toast(this._t("cfg_entity")); return false; }
+    if (key && this._busy.has(key)) return false;
+    if (key) this._busy.add(key);
+    try { await this._hass.callService(domain, service, { entity_id: entity, ...data }); return true; }
+    catch (err) {
+      console.warn("Media Fusion Card:", domain, service, err);
+      const m = `${this._t("err")}: ${String(err?.message || "").slice(0, 110)}`;
+      this._toast(m);
+      const e = this._pr?.querySelector("[data-err]"); if (e) { e.textContent = m; e.hidden = false; }
+      return false;
+    } finally { if (key) this._busy.delete(key); }
+  }
+  _toast(msg) {
+    const el = this.shadowRoot.querySelector(".toast"); if (!el) return;
+    el.textContent = msg; el.hidden = false;
+    clearTimeout(this._toastT); this._toastT = setTimeout(() => { el.hidden = true; }, 4200);
+  }
+  _volKey() { return `media-fusion-card:volume:${this._config.audio_entity || ""}`; }
+  _loadVol() { try { const r = localStorage.getItem(this._volKey()); const v = Number(r); return r !== null && Number.isFinite(v) ? clamp(Math.round(v), 0, 100) : NaN; } catch (e) { return NaN; } }
+  _saveVol(n) { try { localStorage.setItem(this._volKey(), String(n)); } catch (e) { /* storage not available */ } }
+  _setVol(pct) {
+    const n = Math.round(clamp(pct, 0, 100));
+    this._pendVol = { value: n, until: Date.now() + 3500 }; this._lastVol = n; this._saveVol(n);
+    this._render(true);
+    this._call("media_player", "volume_set", this._config.audio_entity, { volume_level: n / 100 }, "");
+  }
+  _tvPower() {
+    const c = this._config, s = this._s("tv_entity");
+    if (isOn(s)) {
+      if (entityValid(c.tv_off_script, "script")) return this._call("script", "turn_on", c.tv_off_script, {}, "tvpower");
+      if (supports(s, F.TURN_OFF)) return this._call("media_player", "turn_off", c.tv_entity, {}, "tvpower");
+      return this._toast(this._t("tv_no_off"));
+    }
+    if (entityValid(c.tv_on_script, "script")) return this._call("script", "turn_on", c.tv_on_script, {}, "tvpower");
+    if (validState(s) && supports(s, F.TURN_ON)) return this._call("media_player", "turn_on", c.tv_entity, {}, "tvpower");
+    return this._toast(this._t("tv_no_on"));
+  }
+  _stPower() {
+    const c = this._config, s = this._s("streaming_entity"), on = !isOn(s);
+    if (!validState(s)) return this._toast(this._t("unavailable"));
+    if (c.streaming_adb_power) return this._call("androidtv", "adb_command", c.streaming_entity, { command: on ? "WAKEUP" : "SLEEP" }, "stpower", "media_player");
+    if (supports(s, on ? F.TURN_ON : F.TURN_OFF)) return this._call("media_player", on ? "turn_on" : "turn_off", c.streaming_entity, {}, "stpower");
+    if (entityValid(c.streaming_remote, "remote") && validState(this._st(c.streaming_remote))) return this._call("remote", "send_command", c.streaming_remote, { command: on ? "WAKEUP" : "SLEEP" }, "stpower");
+    return this._toast(this._t("st_no_power"));
+  }
+  // Apps: Android Debug Bridge launches an app with select_source and the app ID.
+  async _openApp(i) {
+    const c = this._config, a = c.apps[i], s = this._s("streaming_entity");
+    if (!a || !validState(s)) return false;
+    const list = Array.isArray(s.attributes?.source_list) ? s.attributes.source_list : [];
+    let source = appIdOk(a.app_id) ? a.app_id : (a.name && list.includes(a.name) ? a.name : "");
+    if (!source) { this._toast(this._t("no_app_id")); return false; }
+    return this._call("media_player", "select_source", c.streaming_entity, { source }, `app${i}`);
+  }
+  _onClick(e) {
+    const el = e.target.closest("button"); if (!el || el.disabled) return;
+    if (el.dataset.pop) { this._openPop(el.dataset.pop, el); return; }
+    if (el.dataset.app !== undefined) { this._openApp(Number(el.dataset.app)); return; }
+    const c = this._config;
+    switch (el.dataset.a) {
+      case "play": { const s = this._s("audio_entity"); this._call("media_player", s?.state === "playing" ? "media_pause" : "media_play", c.audio_entity, {}, "play"); break; }
+      case "prev": this._call("media_player", "media_previous_track", c.audio_entity, {}, "prev"); break;
+      case "next": this._call("media_player", "media_next_track", c.audio_entity, {}, "next"); break;
+      case "vd": case "vu": { const { v } = this._volInfo(); this._setVol((v ?? 0) + (el.dataset.a === "vu" ? 5 : -5)); break; }
+      case "mute": { const s = this._s("audio_entity"); this._call("media_player", "volume_mute", c.audio_entity, { is_volume_muted: !s?.attributes?.is_volume_muted }, "mute"); break; }
+      case "tvpower": this._tvPower(); break;
+      case "stpower": this._stPower(); break;
+      case "stplay": this._call("media_player", "media_play_pause", c.streaming_entity, {}, "stplay"); break;
     }
   }
-  _updateScripts(){
-    const scripts=this._config.scripts.filter(s=>entityValid(s.entity_id,"script"));
-    this._setText("scriptCount",scripts.length===1?"1 azione":`${scripts.length} azioni`);
-    const info=scripts.map(s=>{const st=this._stateById(s.entity_id);return {label:short(s.name,short(st?.attributes?.friendly_name,s.entity_id)),icon:stateIcon(st,""),run:st?.state==="on",gone:!st||st.state==="unavailable"};});
-    const sig=JSON.stringify(info);
-    if(sig===this._scriptsHash)return;
-    this._scriptsHash=sig;
-    this._q("scriptButtons").innerHTML=info.map((x,i)=>`<button type="button" class="script-button${x.run?" run":""}" data-script="${i}" ${x.gone?"disabled":""} aria-label="${x.run?"In esecuzione: ":"Avvia "}${escapeHtml(x.label)}">${x.run?ico("loading").replace('class="ico sm','class="ico sm spin'):(x.icon?`<ha-icon class="ico sm" icon="${x.icon}" aria-hidden="true"></ha-icon>`:ico(i===0?"power":i===1?"sun":"spark"))}<span>${escapeHtml(x.label)}${x.run?" · in corso":""}</span></button>`).join("");
-  }
-  _onClick(event){
-    const el=event.target.closest("button");if(!el||el.disabled)return;
-    if(el.dataset.open){
-      const type=el.dataset.open;
-      if(type==="sources")this._sources("samsung");
-      else if(type==="fireapps")this._sources("fire");
-      else if(type==="remote-samsung")this._remote("samsung");
-      else if(type==="remote-fire")this._remote("fire");
-      return;
-    }
-    const id=el.id;
-    if(id==="tvPower"){
-      const s=this._state("tv_entity");
-      if(isOn(s)) {
-        if(entityValid(this._config.tv_off_script,"script"))this._send("script","turn_on",this._config.tv_off_script,{},"tvPower");
-        else if(supports(s,MEDIA_TURN_OFF))this._send("media_player","turn_off",this._config.tv_entity,{},"tvPower");
-        else this._toast("Configura uno script di spegnimento TV in Azioni.");
-      } else {
-        if(entityValid(this._config.tv_on_script,"script"))this._send("script","turn_on",this._config.tv_on_script,{},"tvPower");
-        else if(supports(s,MEDIA_TURN_ON))this._send("media_player","turn_on",this._config.tv_entity,{},"tvPower");
-        else this._toast("La TV non supporta l’accensione diretta. Configura uno script di accensione TV in Azioni.");
+
+  /* ---------- popup (portal outside the card container) ---------- */
+  _ensurePortal() {
+    if (this._portal) return;
+    const p = document.createElement("div");
+    const r = p.attachShadow({ mode: "open" });
+    r.innerHTML = `<style>${POPUP_CSS}</style><div class="ov" role="dialog" aria-modal="true" aria-labelledby="dt"><div class="dlg" tabindex="-1"><div class="dh"><h3 id="dt"></h3><button class="x" data-x aria-label="">${ico("mdi:close")}</button></div><div class="db"></div></div></div>`;
+    r.addEventListener("click", e => this._onPopClick(e));
+    r.addEventListener("input", e => this._onPopInput(e));
+    r.addEventListener("change", e => this._onPopInput(e, true));
+    this._key = e => {
+      if (!this._pop) return;
+      if (e.key === "Escape") { e.preventDefault(); this._closePop(); return; }
+      if (e.key === "Tab") {
+        const b = [...r.querySelectorAll("button:not([disabled]),input:not([disabled])")]; if (!b.length) return;
+        const a = r.activeElement;
+        if (e.shiftKey && a === b[0]) { e.preventDefault(); b[b.length - 1].focus(); }
+        else if (!e.shiftKey && a === b[b.length - 1]) { e.preventDefault(); b[0].focus(); }
       }
-    } else if(id==="firePower")this._fireToggle();
-    else if(id==="firePlay") this._togglePlay("streaming_entity");
-    else if(id==="alexaPlay") this._togglePlay("audio_entity");
-    else if(id==="alexaPrev") this._send("media_player","media_previous_track",this._config.audio_entity,{},"alexa-prev");
-    else if(id==="alexaNext") this._send("media_player","media_next_track",this._config.audio_entity,{},"alexa-next");
-    else if(id==="volMinus"||id==="volPlus"){
-      const s=this._state("audio_entity");const v=s?.attributes?.volume_level;
-      if(typeof v==="number")this._setVolume((this._pendingVolume?.value??Math.round(v*100))+(id==="volPlus"?5:-5));
-    }else if(id==="volMute"){
-      const s=this._state("audio_entity");this._send("media_player","volume_mute",this._config.audio_entity,{is_volume_muted:!s?.attributes?.is_volume_muted},"mute");
-    }else if(id==="ambientSwitch"){
-      const s=this._state("light_entity");this._send("light",s?.state==="on"?"turn_off":"turn_on",this._config.light_entity,{},"light");
-    }else if(el.dataset.script!==undefined){
-      const arr=this._config.scripts.filter(s=>entityValid(s.entity_id,"script"));const s=arr[Number(el.dataset.script)];
-      if(s)this._send("script","turn_on",s.entity_id,{},`script:${s.entity_id}`);
-    }else if(el.dataset.sim){this._toast("Azione non disponibile in questa configurazione");}
+    };
+    this._resize = () => this._size();
+    document.body.appendChild(p);
+    this._portal = p; this._pr = r;
+    this._portal.toggleAttribute("data-dark", this._dark());
   }
-  _onInput(event){
-    const target=event.target;
-    if(target.id==="volume") {this._editingVolume=true;this._updateVolVisual(Number(target.value),false);}
-    else if(target.id==="brightness") {this._editingBrightness=true;target.style.setProperty("--fill",`${target.value}%`);this._setText("brightOut",`${target.value}%`);this._liveBrightness(Number(target.value),false);}
+  _size() { const ov = this._pr?.querySelector(".ov"); if (ov) ov.classList.toggle("wide", !IS_PHONE() && window.innerWidth >= 640 && window.innerHeight >= 600); }
+  _openPop(kind, from) {
+    this._ensurePortal();
+    this._pop = kind; this._ret = from || null;
+    this._pr.querySelector("[data-x]").setAttribute("aria-label", this._t("close"));
+        this._size();
+    this._fillPop(true);
+    this._pr.querySelector(".ov").classList.add("open");
+    document.addEventListener("keydown", this._key); window.addEventListener("resize", this._resize);
+    this._pr.querySelector(".dlg").focus({ preventScroll: true });
   }
-  _onChange(event){
-    const target=event.target;
-    if(target.id==="volume") {this._editingVolume=false;this._setVolume(Number(target.value));}
-    else if(target.id==="brightness"){
-      this._editingBrightness=false;
-      this._liveBrightness(Number(target.value),true);
+  _closePop() {
+    if (!this._pop) return;
+    this._pop = null;
+    this._pr?.querySelector(".ov").classList.remove("open");
+    document.removeEventListener("keydown", this._key); window.removeEventListener("resize", this._resize);
+    if (this._ret?.isConnected) this._ret.focus({ preventScroll: true });
+    else { const k = this._ret?.dataset?.fk; if (k) this.shadowRoot.querySelector(`[data-fk="${CSS.escape(k)}"]`)?.focus({ preventScroll: true }); }
+    this._ret = null;
+  }
+  _refreshPop() { if (this._pop && this._pop !== "remote" && !this._dragging) this._fillPop(false); else if (this._pop === "remote") this._remoteState(); }
+  _fillPop(first) {
+    const db = this._pr.querySelector(".db"), st = db.scrollTop;
+    const titles = { sources: "tv_sources", apps: "apps", remote: "remote", light: "light", scripts: "script_actions" };
+    this._pr.querySelector("#dt").textContent = this._pop === "light" ? short(this._config.light_name, short(this._s("light_entity")?.attributes?.friendly_name, this._t("light"))) : this._t(titles[this._pop]);
+    const err = db.querySelector("[data-err]:not([hidden])")?.textContent || "";
+    db.innerHTML = this[`_pop_${this._pop}`]() + `<p class="err" data-err role="alert" ${err ? "" : "hidden"}>${esc(err)}</p>`;
+    if (!first) db.scrollTop = st; else db.scrollTop = 0;
+    if (this._pop === "remote") this._remoteState();
+  }
+  _pop_sources() {
+    const s = this._s("tv_entity"), list = Array.isArray(s?.attributes?.source_list) ? s.attributes.source_list.filter(x => typeof x === "string") : [];
+    if (!validState(s) || !supports(s, F.SELECT_SOURCE) || !list.length) return `<p class="note">${esc(this._t("no_sources"))}</p>`;
+    return `<div class="cols"><div class="sec">${esc(this._t("inputs"))}</div>${list.map((x, i) => { const a = x === s.attributes?.source; return `<button class="it${a ? " act" : ""}" data-src="${i}"><span class="l">${ico("mdi:video-input-hdmi")}<span>${esc(x)}<small>${esc(this._t(a ? "in_use" : "available"))}</small></span></span>${a ? ico("mdi:check") : ""}</button>`; }).join("")}</div>`;
+  }
+  _pop_apps() {
+    const c = this._config, s = this._s("streaming_entity"), on = isOn(s), cur = this._activeApp(s);
+    if (c.apps.length) return `<div class="cols"><div class="sec">${esc(this._t("tap_open"))}</div>${c.apps.map((a, i) => { const act = a === cur; return `<button class="it${act ? " act" : ""}" data-papp="${i}" ${on ? "" : "disabled"}><span class="l">${ico(a.icon || "mdi:application-outline")}<span>${esc(short(a.name, a.app_id || "App"))}<small>${esc(this._t(act ? "open_now" : "open_on"))}</small></span></span>${act ? ico("mdi:check") : ""}</button>`; }).join("")}</div>`;
+    // No apps configured: fall back to the player's own source list, as in earlier versions.
+    const list = Array.isArray(s?.attributes?.source_list) ? s.attributes.source_list.filter(x => typeof x === "string") : [];
+    if (validState(s) && supports(s, F.SELECT_SOURCE) && list.length) return `<div class="cols"><div class="sec">${esc(this._t("sources"))}</div>${list.map((x, i) => { const a = x === s.attributes?.source; return `<button class="it${a ? " act" : ""}" data-ssrc="${i}" ${on ? "" : "disabled"}><span class="l">${ico("mdi:application-outline")}<span>${esc(x)}</span></span>${a ? ico("mdi:check") : ""}</button>`; }).join("")}</div>`;
+    return `<p class="note">${esc(this._t("no_apps"))}</p>`;
+  }
+  _pop_light() {
+    const { ok, on, b, dimmable } = this._lightInfo();
+    const name = short(this._config.light_name, short(this._s("light_entity")?.attributes?.friendly_name, this._t("light")));
+    const sub = !ok ? this._t("unavailable") : on ? (b !== null ? `${this._t("lights_on")} · ${b}%` : this._t("lights_on")) : this._t("lights_off");
+    return `<div class="cols"><div><div class="sec">${esc(this._t("light"))}</div><div class="it" style="cursor:default"><span class="l">${ico(iconOk(this._s("light_entity")?.attributes?.icon) ? this._s("light_entity").attributes.icon : "mdi:led-strip-variant")}<span>${esc(name)}<small>${esc(sub)}</small></span></span><button class="sw${on ? " on" : ""}" data-light role="switch" aria-checked="${on}" aria-label="${esc(this._t("light_switch"))}" ${ok ? "" : "disabled"}></button></div></div>
+      ${dimmable ? `<div><div class="sec">${esc(this._t("brightness"))}</div><div class="it sl" style="cursor:default">${ico("mdi:white-balance-sunny")}<input type="range" min="1" max="100" step="1" value="${b ?? 0}" data-bri aria-label="${esc(this._t("brightness"))}" ${on ? "" : "disabled"}><output data-bro>${b === null ? "—" : `${b}%`}</output></div></div>` : ""}</div>`;
+  }
+  _pop_scripts() {
+    return `<div class="cols"><div class="sec">${esc(this._t("script_actions"))}</div>${this._config.scripts.map((x, i) => {
+      if (!entityValid(x.entity_id, "script")) return "";
+      const st = this._st(x.entity_id), run = st?.state === "on", gone = !st || st.state === "unavailable";
+      const label = short(x.name, short(st?.attributes?.friendly_name, x.entity_id));
+      const icon = iconOk(st?.attributes?.icon) ? st.attributes.icon : "mdi:lightning-bolt-outline";
+      return `<button class="it" data-run="${i}" ${gone || run ? "disabled" : ""}><span class="l">${run ? ico("mdi:loading", "spin") : ico(icon)}<span>${esc(label)}<small>${esc(this._t(gone ? "unavailable" : run ? "running" : "run"))}</small></span></span></button>`;
+    }).join("")}</div>`;
+  }
+  _pop_remote() {
+    const t = k => esc(this._t(k));
+    const RK = (key, icon, label, cls = "", cap = "") => { const b = `<button class="rb ${cls}" data-key="${key}" aria-label="${t(label)}" title="${t(label)}">${ico(icon)}</button>`; return cap ? `<span class="kc">${b}${t(cap)}</span>` : b; };
+    return `<div class="rc"><div class="rmt"><span class="rled" data-led></span>
+      <div class="rhalf">
+        <div class="rr">${RK("power", "mdi:power", "power_tv", "pwr", "power")}${RK("source", "mdi:login-variant", "tv_sources", "", "source")}</div>
+        <div class="ring2"><span class="seg4" data-seg></span>
+          <button class="u" data-key="up" data-dir="315" aria-label="${t("up")}">${ico("mdi:chevron-up", "lg")}</button>
+          <button class="l" data-key="left" data-dir="225" aria-label="${t("left")}">${ico("mdi:chevron-left", "lg")}</button>
+          <button class="o" data-key="ok" aria-label="OK">OK</button>
+          <button class="r" data-key="right" data-dir="45" aria-label="${t("right")}">${ico("mdi:chevron-right", "lg")}</button>
+          <button class="d" data-key="down" data-dir="135" aria-label="${t("down")}">${ico("mdi:chevron-down", "lg")}</button>
+        </div>
+        <div class="rr">${RK("back", "mdi:arrow-u-left-top", "back", "", "back")}${RK("home", "mdi:home-outline", "home", "", "home")}${RK("apps", "mdi:apps", "all_apps", "", "app")}${RK("menu", "mdi:menu", "menu", "", "menu")}</div>
+      </div>
+      <div class="rhalf">
+        <div class="rr mid">${RK("rew", "mdi:rewind", "rew")}${RK("pp", "mdi:play-pause", "playpause", "pp")}${RK("ff", "mdi:fast-forward", "ff")}</div>
+        <div class="rocks"><div class="rock"><button data-key="volup" aria-label="${t("vol_up")}">${ico("mdi:plus")}</button><span>VOL</span><button data-key="voldown" aria-label="${t("vol_down")}">${ico("mdi:minus")}</button></div>
+          ${RK("mute", "mdi:volume-off", "mute", "", "mute")}
+          <div class="rock"><button data-key="chup" aria-label="${t("ch_up")}">${ico("mdi:chevron-up")}</button><span>CH</span><button data-key="chdown" aria-label="${t("ch_down")}">${ico("mdi:chevron-down")}</button></div></div>
+      </div></div></div>`;
+  }
+  // Where each remote key goes, or null when no route is configured.
+  _route(key) {
+    const c = this._config, tvR = entityValid(c.tv_remote, "remote") && validState(this._st(c.tv_remote)) ? c.tv_remote : "";
+    const tv = this._s("tv_entity"), tvOk = this._has("tv") && validState(tv);
+    if (key === "power") return this._has("tv") && (tvOk || entityValid(c.tv_on_script, "script")) ? { fn: () => this._tvPower() } : null;
+    if (key === "source") return tvOk && isOn(tv) && supports(tv, F.SELECT_SOURCE) ? { fn: () => this._openPop("sources", this._ret) } : null;
+    if (key === "apps") return this._has("streaming") && isOn(this._s("streaming_entity")) ? { fn: () => this._openPop("apps", this._ret) } : null;
+    if (["volup", "voldown", "mute", "chup", "chdown"].includes(key)) {
+      if (tvR) return { d: "remote", s: "send_command", e: tvR, data: { command: TV_KEYS[key] } };
+      if (!tvOk || key.startsWith("ch")) return null;
+      if (key === "mute") return supports(tv, F.VOLUME_MUTE) ? { d: "media_player", s: "volume_mute", e: c.tv_entity, data: { is_volume_muted: !tv.attributes?.is_volume_muted } } : null;
+      return supports(tv, F.VOLUME_STEP) || supports(tv, F.VOLUME_SET) ? { d: "media_player", s: key === "volup" ? "volume_up" : "volume_down", e: c.tv_entity, data: {} } : null;
     }
-  }
-  _volKey(){return `media-fusion-card:volume:${this._config?.audio_entity||""}`;}
-  _loadVolume(){try{const v=Number(localStorage.getItem(this._volKey()));return localStorage.getItem(this._volKey())!==null&&Number.isFinite(v)?clamp(Math.round(v),0,100):NaN;}catch(e){return NaN;}}
-  _saveVolume(n){try{localStorage.setItem(this._volKey(),String(n));}catch(e){}}
-  _liveBrightness(v,final){
-    const n=Math.round(clamp(v,1,100));
-    this._pendingBright={value:n,until:Date.now()+3500};
-    clearTimeout(this._brightTimer);
-    const go=()=>{this._lastBrightSend=Date.now();this._send("light","turn_on",this._config.light_entity,{brightness_pct:this._pendingBright.value});};
-    const wait=final?0:Math.max(0,150-(Date.now()-(this._lastBrightSend||0)));
-    if(wait===0)go();else this._brightTimer=setTimeout(go,wait);
-  }
-  _setVolume(pct){
-    const n=Math.round(clamp(pct,0,100));
-    this._pendingVolume={value:n,until:Date.now()+3500};this._lastSetVolume=n;this._saveVolume(n);
-    this._updateVolVisual(n,false);
-    this._send("media_player","volume_set",this._config.audio_entity,{volume_level:n/100},"alexa-volume");
-  }
-  _togglePlay(field){
-    const s=this._state(field); if(!validState(s))return;
-    this._send("media_player",s.state==="playing"?"media_pause":"media_play",this._config[field],{},`play:${field}`);
-  }
-  async _send(domain,action,entityId,data={},key="",targetDomain=domain){
-    if(!this._hass?.callService|| !entityValid(entityId,targetDomain)){this._toast("Configura un'entità valida nell'editor");return false;}
-    if(key && this._busy.has(key))return false;
-    if(key)this._busy.add(key);
-    let succeeded=false;
-    try{
-      await this._hass.callService(domain,action,{entity_id:entityId,...data});
-      succeeded=true;
-    }catch(err){
-      if(key==="alexa-volume")this._pendingVolume=null;
-      console.warn("Media Fusion Card: errore servizio",domain,action,err);
-      this._toast(`Comando non riuscito: ${String(err?.message||"verifica il dispositivo").slice(0,95)}`);
-      const error=this._p("dialogError");if(error){error.textContent=`Comando non riuscito: ${String(err?.message||"verifica il dispositivo").slice(0,120)}`;error.hidden=false;}
-    }finally{if(key)this._busy.delete(key);this._update();}
-    return succeeded;
-  }
-  _toast(msg){
-    const el=this._q("feedback");if(!el)return;
-    el.hidden=false;el.textContent=msg;
-    clearTimeout(this._toastTimeout);
-    this._toastTimeout=setTimeout(()=>{el.hidden=true;},4600);
-  }
-  _ensurePortal(){
-    if(this._portal)return;
-    this._portal=document.createElement("div");this._portal.className="edera-media-portal";
-    this._portal.style.cssText="position:fixed;inset:0;z-index:9999;pointer-events:none";
-    const root=this._portal.attachShadow({mode:"open"});
-    root.innerHTML=`<style>${BASE_CSS}${EXTRA_CSS} :host{pointer-events:none;font-family:var(--ha-font-family-body,Roboto,Arial,sans-serif);--panel:#fafbf9;--panel2:#f0f2ef;--ink:#18221c;--muted:#56675c;--line:#e0e5df;--emerald:#0a7156;--circle:#fff;--track:#dfe5e0}:host([data-dark]){--circle:#282b29;--track:#2b302c;--panel:#101211;--panel2:#191c1a;--ink:#f5f7f4;--muted:#bbc5bd;--line:#2b302c;--emerald:#0e795d;--soft:#1d352c;--greenText:#c4e8d8}.overlay.open{pointer-events:auto}.dialog-header{background:var(--panel);position:sticky;top:0;z-index:3}.dialog{color:var(--ink);font-size:14px}.dialog-note{font-size:12px}.dialog-error{color:#ee8585;font-size:12px;margin:10px 0 0;line-height:1.5}.remote-top button,.remote-bottom button{font-weight:600}.dialog-header .micro{letter-spacing:1.7px;font-size:10px;font-weight:750}</style>${ICONS}<div class="overlay" id="overlay" role="presentation"><div class="dialog" role="dialog" aria-modal="true" aria-labelledby="dialogTitle"><div class="dialog-header"><div><div class="micro" id="dialogEyebrow">MEDIA FUSION</div><h3 id="dialogTitle">Dettagli</h3></div><button class="circle-btn" id="closeDialog" aria-label="Chiudi finestra">${ico("close")}</button></div><div class="dialog-content" id="dialogContent"></div></div></div>`;
-    root.addEventListener("click",event=>this._onDialogClick(event));
-    document.addEventListener("keydown",this._keyListener??=(e=>this._onKey(e)));
-    document.body.appendChild(this._portal);
-  }
-  _destroyPortal(){
-    this._portal?.remove();this._portal=null;
-    if(this._keyListener)document.removeEventListener("keydown",this._keyListener);
-    clearTimeout(this._toastTimeout);
-    this._rendered=false;
-  }
-  _p(id){return this._portal?.shadowRoot?.getElementById(id);}
-  _open(title,eyebrow,html){
-    this._ensurePortal();this._returnFocus=this.shadowRoot.activeElement;
-    this._p("dialogTitle").textContent=title;
-    this._p("dialogEyebrow").textContent=eyebrow;
-    this._p("dialogContent").innerHTML=`${html}<p id="dialogError" class="dialog-error" role="alert" hidden></p>`;
-    this._p("overlay").classList.add("open");
-    this._portal.style.pointerEvents="auto";
-    this._p("closeDialog").focus({preventScroll:true});
-  }
-  _close(){
-    if(!this._p("overlay")?.classList.contains("open"))return;
-    this._p("overlay").classList.remove("open");this._portal.style.pointerEvents="none";
-    if(this._returnFocus?.isConnected)this._returnFocus.focus({preventScroll:true});
-  }
-  _onKey(e){
-    if(!this._p("overlay")?.classList.contains("open"))return;
-    if(e.key==="Escape"){e.preventDefault();this._close();return;}
-    if(e.key==="Tab"){
-      const b=Array.from(this._portal.shadowRoot.querySelectorAll(".overlay button:not([disabled])"));
-      if(!b.length)return;
-      const active=this._portal.shadowRoot.activeElement;
-      if(e.shiftKey&&active===b[0]){e.preventDefault();b[b.length-1].focus();}
-      else if(!e.shiftKey&&active===b[b.length-1]){e.preventDefault();b[0].focus();}
+    const target = this._target();
+    if (key === "pp") {
+      const ent = target === "streaming" ? c.streaming_entity : c.tv_entity, s = this._st(ent);
+      return validState(s) ? { d: "media_player", s: "media_play_pause", e: ent, data: {} } : null;
     }
+    if (!NAV.includes(key)) return null;
+    if (target === "streaming") {
+      const sr = entityValid(c.streaming_remote, "remote") && validState(this._st(c.streaming_remote)) ? c.streaming_remote : "";
+      if (sr) return { d: "remote", s: "send_command", e: sr, data: { command: ADB_KEYS[key] } };
+      return validState(this._s("streaming_entity")) ? { d: "androidtv", s: "adb_command", e: c.streaming_entity, data: { command: ADB_KEYS[key] }, dom: "media_player" } : null;
+    }
+    return tvR ? { d: "remote", s: "send_command", e: tvR, data: { command: TV_KEYS[key] } } : null;
   }
-  _sourceItem(kind,name,selected){
-    return `<button class="dialog-item ${selected?"active":""}" data-source-kind="${kind}" data-source="${escapeHtml(name)}" style="width:100%;text-align:left;cursor:pointer"><div><span>${escapeHtml(name)}</span><small>${kind==="samsung"?"Sorgente TV":"Applicazione / sorgente"}</small></div>${ico(selected?"check":"chevron")}</button>`;
+  _remoteState() {
+    if (!this._pr) return;
+    this._pr.querySelectorAll("[data-key]").forEach(b => { b.disabled = !this._route(b.dataset.key); });
   }
-  _sources(kind){
-    const s=this._state(kind==="samsung"?"tv_entity":"streaming_entity");
-    const list=Array.isArray(s?.attributes?.source_list)?s.attributes.source_list.filter(x=>typeof x==="string"):[];
-    const available=validState(s),supported=supports(s,MEDIA_SELECT_SOURCE);
-    const html=!available?`<p class="dialog-note">Dispositivo non disponibile.</p>`:
-      !supported?`<p class="dialog-note">Questa entità non espone la selezione delle sorgenti.</p>`:
-      list.length?list.map(src=>this._sourceItem(kind,src,src===s.attributes?.source)).join(""):
-      `<p class="dialog-note">Nessuna sorgente nell'attributo source_list. Controlla le opzioni dell'integrazione del lettore.</p>`;
-    this._open(kind==="samsung"?"Sorgenti TV":"Sorgenti streaming", "SORGENTI DISPONIBILI",html);
+  _press(btn) {
+    const key = btn.dataset.key, r = this._route(key);
+    if (!r) { this._toast(this._t("no_remote")); return; }
+    if (r.fn) { r.fn(); return; }
+    btn.classList.add("sent"); setTimeout(() => btn.classList.remove("sent"), 220);
+    const led = this._pr.querySelector("[data-led]"); if (led) { led.classList.add("flash"); setTimeout(() => led.classList.remove("flash"), 160); }
+    const seg = this._pr.querySelector("[data-seg]"); if (seg && btn.dataset.dir) { seg.style.setProperty("--a", `${btn.dataset.dir}deg`); seg.classList.add("on"); setTimeout(() => seg.classList.remove("on"), 160); }
+    this._call(r.d, r.s, r.e, r.data, "", r.dom || r.d);
   }
-  async _fireCommand(on){
-    const s=this._state("streaming_entity"),rid=this._config.streaming_remote;
-    if(this._config.streaming_adb_power===true)return this._send("androidtv","adb_command",this._config.streaming_entity,{command:on?"WAKEUP":"SLEEP"},`fire-adb:${on?"on":"off"}`,"media_player");
-    if(supports(s,on?MEDIA_TURN_ON:MEDIA_TURN_OFF))return this._send("media_player",on?"turn_on":"turn_off",this._config.streaming_entity,{},`fire:${on?"on":"off"}`);
-    if(entityValid(rid,"remote") && validState(this._stateById(rid)))return this._send("remote","send_command",rid,{command:on?"WAKEUP":"SLEEP"},`fire-remote:${on?"on":"off"}`);
-    return null;
-  }
-  async _fireToggle(){
-    const s=this._state("streaming_entity");
-    if(!validState(s)){this._toast("Lettore streaming non disponibile");return;}
-    const result=await this._fireCommand(!isOn(s));
-    if(result===null)this._toast("Il lettore non espone il comando richiesto. Verifica le funzioni del dispositivo o configura il telecomando remote.");
-  }
-  _firePowerMenu(){
-    if(!validState(this._state("streaming_entity"))){this._toast("Lettore streaming non disponibile");return;}
-    this._open("Alimentazione lettore","COMANDI DI ALIMENTAZIONE",`<div class="power-menu"><button type="button" data-fire-action="on">${ico("power")} Accendi</button><button type="button" data-fire-action="off">${ico("power")} Spegni</button></div>`);
-  }
-  _remoteId(kind){return this._config[kind==="samsung"?"tv_remote":"streaming_remote"];}
-  _remote(kind){this._modalMode=kind;this._open("Telecomando","CONTROLLO REMOTO",this._remoteHtml());}
-  _remoteHtml(){
-    const kind=this._modalMode,ks=KEYSETS[kind],id=this._remoteId(kind);
-    const remoteAvailable=entityValid(id,"remote") && validState(this._stateById(id));
-    const adbAvailable=kind==="fire" && validState(this._state("streaming_entity"));
-    const canUse=remoteAvailable||adbAvailable;
-    const disabled=canUse?"":"disabled";
-    const press=(label,key,ic)=>`<button ${disabled} data-remote-key="${escapeHtml(key)}">${ico(ic)} ${label}</button>`;
-    return `<div class="remote-switcher"><button data-remmode="samsung" class="${kind==="samsung"?"active":""}">TV</button><button data-remmode="fire" class="${kind==="fire"?"active":""}">Lettore streaming</button></div>
-      <div class="remote-frame"><div class="remote-top">${press("Home",ks.home,"home")}${press("Power",ks.power,"power")}</div>
-      <div class="dpad">
-      <button ${disabled} class="up" data-remote-key="${ks.up}" aria-label="Su">${ico("up","lg")}</button>
-      <button ${disabled} class="left" data-remote-key="${ks.left}" aria-label="Sinistra">${ico("left","lg")}</button>
-      <button ${disabled} class="ok" data-remote-key="${ks.ok}">OK</button>
-      <button ${disabled} class="right" data-remote-key="${ks.right}" aria-label="Destra">${ico("right","lg")}</button>
-      <button ${disabled} class="down" data-remote-key="${ks.down}" aria-label="Giù">${ico("down","lg")}</button>
-      </div><div class="remote-bottom">${press("Indietro",ks.back,"back")}${press("Mute",ks.mute,"mute")}</div>
-      <div class="remote-bottom">${press("Volume meno",ks.voldown,"minus")}${press("Volume più",ks.volup,"plus")}</div></div>`;
-  }
-  async _onDialogClick(event){
-    if(event.target===this._p("overlay")||event.target.closest("#closeDialog")){this._close();return;}
-    const el=event.target.closest("button");if(!el||el.disabled)return;
-    if(el.dataset.fireAction){
-      const s=this._state("streaming_entity"),on=el.dataset.fireAction==="on";
-      const rid=this._config.streaming_remote;
-      let result=false;
-      if(this._config.streaming_adb_power===true)result=await this._send("androidtv","adb_command",this._config.streaming_entity,{command:on?"WAKEUP":"SLEEP"},`fire-adb:${on?"on":"off"}`,"media_player");
-      else if(supports(s,on?MEDIA_TURN_ON:MEDIA_TURN_OFF))result=await this._send("media_player",on?"turn_on":"turn_off",this._config.streaming_entity,{},`fire:${on?"on":"off"}`);
-      else if(entityValid(rid,"remote") && validState(this._stateById(rid)))result=await this._send("remote","send_command",rid,{command:on?"WAKEUP":"SLEEP"},`fire-remote:${on?"on":"off"}`);
-      else {const e=this._p("dialogError");if(e){e.textContent="Il lettore non espone il comando richiesto. Verifica le funzioni del dispositivo o configura il telecomando remote.";e.hidden=false;}}
-      if(result)this._close();
+  async _onPopClick(e) {
+    if (e.target.classList?.contains("ov")) { this._closePop(); return; }
+    const el = e.target.closest("button"); if (!el || el.disabled) return;
+    if (el.hasAttribute("data-x")) { this._closePop(); return; }
+    if (el.dataset.key) { this._press(el); return; }
+    const c = this._config;
+    if (el.dataset.src !== undefined) {
+      const s = this._s("tv_entity"), src = s?.attributes?.source_list?.[Number(el.dataset.src)];
+      if (typeof src === "string" && await this._call("media_player", "select_source", c.tv_entity, { source: src }, "tvsrc")) this._closePop();
       return;
     }
-    if(el.dataset.remmode){this._modalMode=el.dataset.remmode;this._p("dialogContent").innerHTML=this._remoteHtml();return;}
-    if(el.dataset.remoteKey){
-      const rid=this._remoteId(this._modalMode);
-      const allowed=Object.values(KEYSETS[this._modalMode]);
-      if(!allowed.includes(el.dataset.remoteKey))return;
-      if(entityValid(rid,"remote") && validState(this._stateById(rid)))this._send("remote","send_command",rid,{command:el.dataset.remoteKey},`remote:${this._modalMode}:${el.dataset.remoteKey}`);
-      else if(this._modalMode==="fire")this._send("androidtv","adb_command",this._config.streaming_entity,{command:el.dataset.remoteKey},`adb:${el.dataset.remoteKey}`,"media_player");
+    if (el.dataset.ssrc !== undefined) {
+      const s = this._s("streaming_entity"), src = s?.attributes?.source_list?.[Number(el.dataset.ssrc)];
+      if (typeof src === "string" && await this._call("media_player", "select_source", c.streaming_entity, { source: src }, "stsrc")) this._closePop();
       return;
     }
-    if(el.dataset.source){
-      const kind=el.dataset.sourceKind;
-      const s=this._state(kind==="samsung"?"tv_entity":"streaming_entity");
-      if(!supports(s,MEDIA_SELECT_SOURCE) || !Array.isArray(s?.attributes?.source_list) || !s.attributes.source_list.includes(el.dataset.source))return;
-      const result=await this._send("media_player","select_source",this._config[kind==="samsung"?"tv_entity":"streaming_entity"],{source:el.dataset.source},`source:${kind}`);
-      if(result)this._close();
-    }
+    if (el.dataset.papp !== undefined) { if (await this._openApp(Number(el.dataset.papp))) this._closePop(); return; }
+    if (el.hasAttribute("data-light")) { const s = this._s("light_entity"); this._call("light", s?.state === "on" ? "turn_off" : "turn_on", c.light_entity, {}, "light"); return; }
+    if (el.dataset.run !== undefined) { const x = c.scripts[Number(el.dataset.run)]; if (x && entityValid(x.entity_id, "script")) this._call("script", "turn_on", x.entity_id, {}, `run${el.dataset.run}`); }
+  }
+  _onPopInput(e, final) {
+    if (!e.target.matches("[data-bri]")) return;
+    const n = Math.round(clamp(e.target.value, 1, 100));
+    this._dragging = !final;
+    const o = this._pr.querySelector("[data-bro]"); if (o) o.textContent = `${n}%`;
+    this._pendBri = { value: n, until: Date.now() + 3500 };
+    clearTimeout(this._briT);
+    const go = () => { this._lastBri = Date.now(); this._call("light", "turn_on", this._config.light_entity, { brightness_pct: this._pendBri?.value ?? n }); };
+    const wait = final ? 0 : Math.max(0, 150 - (Date.now() - (this._lastBri || 0)));
+    if (wait === 0) go(); else this._briT = setTimeout(go, wait);
+    if (final) this._render(true);
   }
 }
+
+/* ---------------------------------------------------------------- editor */
 class MediaFusionCardEditor extends HTMLElement {
-  constructor(){super();this.attachShadow({mode:"open"});this._tab="sections";this._config=normalize({});}
-  setConfig(config){
-    this._config=normalize(config);
-    this._config.type = config?.type||`custom:${CARD_TAG}`;
-    this._applyTheme();
-    if(this.isConnected)this._render();
+  constructor() {
+    super();
+    this.attachShadow({ mode: "open" });
+    this._config = {}; this._tab = "play"; this._last = ""; this._built = false;
+    this.shadowRoot.addEventListener("click", e => this._click(e));
+    this.shadowRoot.addEventListener("change", e => this._change(e));
   }
-  set hass(hass){this._hass=hass;this._applyTheme();this.shadowRoot.querySelectorAll("ha-selector").forEach(el=>{el.hass=hass;});}
-  connectedCallback(){this._render();}
-  _applyTheme(){
-    const dark=this._config.theme==="dark" || (this._config.theme==="auto" && (this._hass?.themes?.darkMode ?? (typeof window.matchMedia==="function" && window.matchMedia("(prefers-color-scheme: dark)").matches)));
-    this.toggleAttribute("data-dark",!!dark);
+  setConfig(config) {
+    const j = JSON.stringify(config || {});
+    if (this._built && j === this._last) return;
+    this._config = JSON.parse(j); this._last = j; this._render();
   }
-  _change(patch){
-    this._config={...this._config,...patch};
-    this._applyTheme();
-    this.dispatchEvent(new CustomEvent("config-changed",{detail:{config:{...this._config,scripts:this._config.scripts.map(s=>({...s}))}},bubbles:true,composed:true}));
+  set hass(h) {
+    const first = !this._hass; this._hass = h;
+    if (first && this._built) this._render();
+    else this.shadowRoot.querySelectorAll("ha-selector").forEach(s => { s.hass = h; });
   }
-  _set(name,value){this._change({[name]:value});}
-  _render(){
-    const c=this._config;
-    const sw=(field,name,desc)=>`<div class="setting"><label for="ed-${field}"><div class="setting-name">${name}</div><div class="setting-description">${desc}</div></label><input type="checkbox" id="ed-${field}" data-check="${field}" ${c[field]?"checked":""}/></div>`;
-    const field=(name,label,placeholder="")=>`<div class="field"><label for="ed-${name}">${label}</label><input id="ed-${name}" data-text="${name}" type="text" value="${escapeHtml(c[name])}" placeholder="${escapeHtml(placeholder)}" /></div>`;
-    const clearButton=(type,id,hasValue,label)=>`<button type="button" class="clear-entity" data-clear-${type}="${id}" aria-label="Rimuovi ${label}" title="Rimuovi ${label}" ${hasValue?"":"disabled"}>${ico("close")}</button>`;
-    const ent=(name,label,domain)=>`<div class="field"><label>${label}</label><div class="entity-setting"><div class="entity-selector" data-entity-field="${name}" data-domain="${domain}"></div>${clearButton("entity",name,!!c[name],label)}</div></div>`;
-    const tab=(n,label)=>`<button type="button" class="${this._tab===n?"selected":""}" data-tab="${n}">${label}</button>`;
-    this.shadowRoot.innerHTML=`<style>${BASE_CSS}${EXTRA_CSS}
-      :host{display:block;color:var(--ink);font-family:var(--ha-font-family-body,Roboto,Arial,sans-serif)}
-      .editor{width:100%}.entity-selector{min-height:37px}
-      .field{margin-top:12px}.field>label{display:block;font-weight:650;font-size:11px}
-      ha-selector{display:block;width:100%}
-      .script-row{padding:11px 0;border-bottom:1px solid var(--line)}.script-row input{width:100%;box-sizing:border-box}.script-row button.remove{margin-top:7px}
-      .settings-body{display:block}
-      .setting-group{border-bottom:1px solid var(--line)}
-      .setting-group:last-child{border:0}.editor-small{font-size:11px}
-      .setting-name{font-size:14px}.setting-description{font-size:12px}
-      .editor-actions{display:flex;justify-content:flex-start}
-      .settings-bottom{display:none}
-      @media(max-width:480px){.setting-group{padding:10px 0 18px}}
-      </style><section class="editor">
-      <div class="tabs" role="tablist" aria-label="Categorie editor">${tab("sections","Sezioni")}${tab("appearance","Aspetto")}${tab("actions","Azioni")}</div>
-      <header class="editor-head"><div class="top-title">${this._tab==="sections"?"Sezioni disponibili":this._tab==="appearance"?"Aspetto Edera":"Dispositivi e azioni"}</div><p>${this._tab==="sections"?"Attiva soltanto i componenti che desideri visualizzare.":this._tab==="appearance"?"Personalizza intestazione, nomi delle sezioni e tema.":"Seleziona le entità Home Assistant e gli script da eseguire."}</p></header>
-      ${this._tab==="sections" ? `
-        <div class="settings-body">
-        <div class="setting-group"><div class="group-title">Mostra nella dashboard</div>${GROUPS.map(([k,n,d])=>sw(k,n,d)).join("")}</div>
-        <div class="tip">Le sezioni nascoste conservano la configurazione delle entità.</div></div>
-      `:this._tab==="appearance"?`
-        <div class="settings-body"><div class="setting-group"><div class="group-title">Intestazione</div>
-          ${sw("show_eyebrow","Mostra scritta MEDIA FUSION CARD","Intestazione superiore indipendente dal titolo")}
-          ${sw("show_title","Mostra titolo principale","Mostra o nascondi Media Center e il punto verde")}
-          ${c.show_title?field("title","Titolo personalizzato","Media Center"):""}
-          ${sw("compact_mode","Layout compatto","Riduce ingombri e spaziature senza rimuovere controlli")}
-          <div class="field"><label for="ed-artwork_source">Copertina multimediale</label><select id="ed-artwork_source" data-artwork><option value="audio" ${c.artwork_source==="audio"?"selected":""}>Home Theater (se disponibile)</option><option value="streaming" ${c.artwork_source==="streaming"?"selected":""}>Lettore streaming (se disponibile)</option><option value="none" ${c.artwork_source==="none"?"selected":""}>Non mostrare</option></select></div>
-          </div><div class="setting-group"><div class="group-title">Nomi e testi (facoltativi)</div>
-          ${field("tv_headline","Testo principale TV (vuoto per nasconderlo)","Vuoto = nascosto")}
-          ${field("tv_name","Nome TV (vuoto = nome entità)","TV")}
-          ${field("streaming_name","Nome lettore streaming (vuoto = nome entità)","Lettore streaming")}
-          ${field("audio_name","Nome Home Theater (vuoto = nome entità)","Home Theater")}
-          ${field("light_name","Nome luci LED TV (vuoto = nome entità)","Luci LED TV")}
-          </div><div class="setting-group"><div class="group-title">Tema</div><div class="field"><label for="ed-theme">Tema</label><select id="ed-theme" data-theme><option value="auto" ${c.theme==="auto"?"selected":""}>Automatico (Home Assistant)</option><option value="light" ${c.theme==="light"?"selected":""}>Light</option><option value="dark" ${c.theme==="dark"?"selected":""}>Graphite Dark</option></select></div></div></div>
-      `:`
-        <div class="settings-body"><div class="setting-group"><div class="group-title">Entità Home Assistant</div>
-          ${ent("tv_entity","TV · Media player","media_player")}
-          ${ent("tv_on_script","TV · Script accensione (facoltativo)","script")}
-          ${ent("tv_remote","TV · Remote (opzionale)","remote")}
-          ${ent("tv_off_script","TV · Script spegnimento (facoltativo)","script")}
-          ${ent("streaming_entity","Lettore streaming · Media player","media_player")}
-          ${ent("streaming_remote","Lettore streaming · Remote (facoltativo)","remote")}
-          ${sw("streaming_adb_power","Accensione tramite ADB (Fire TV)","Solo per dispositivi Android Debug Bridge: usa WAKEUP e SLEEP.")}
-          ${ent("audio_entity","Home Theater · Media player","media_player")}
-          ${ent("light_entity","Luci LED TV · Luce","light")}
-          </div>
-          <div class="setting-group"><div class="group-title">Script personalizzati</div>
-          ${c.scripts.map((s,i)=>`<div class="script-row" data-script-edit="${i}">
-            <div class="field"><label>Etichetta script ${i+1}</label><input data-script-name="${i}" value="${escapeHtml(s.name)}" placeholder="Nome pulsante" /></div>
-            <div class="field"><label>Entità script</label><div class="entity-setting"><div class="entity-selector" data-script-selector="${i}"></div>${clearButton("script",i,!!s.entity_id,"entità dello script "+(i+1))}</div></div>
-            <button class="remove" data-remove="${i}" type="button">Rimuovi script</button>
-          </div>`).join("")}
-          <div class="editor-actions"><button type="button" class="green-btn" data-add-script>+ Aggiungi script</button></div>
-          <p class="editor-small">Le azioni eseguono soltanto gli script configurati nella tua istanza.</p>
-          </div>${this._diagHtml()}</div>
-      `}
-      <footer class="settings-bottom">Nessun servizio esterno. Le modifiche si applicano alla configurazione della dashboard.</footer>
-      </section>`;
-    this.shadowRoot.querySelectorAll(".entity-selector").forEach(container=>{
-      const key=container.dataset.entityField;
-      const index=container.dataset.scriptSelector;
-      const domain=index!==undefined?"script":container.dataset.domain;
-      const el=document.createElement("ha-selector");
-      el.hass=this._hass;
-      el.selector={entity:{domain}};
-      el.required=false;
-      el.value=index!==undefined?(c.scripts[Number(index)]?.entity_id||""):(c[key]||"");
-      el.addEventListener("value-changed",e=>{
-        const value=e.detail?.value||"";
-        if(index!==undefined){
-          const arr=this._config.scripts.map(s=>({...s}));
-          if(arr[Number(index)]) {arr[Number(index)].entity_id=value;this._set("scripts",arr);}
-        }else this._set(key,value);
-        this._render();
-      });
-      container.appendChild(el);
+  get _l() { return pickLang(this._config.language, this._hass); }
+  _t(k, ...a) { return tr(this._l, k, ...a); }
+  _n() { return normalize(this._config); }
+  _emit(cfg) {
+    this._config = cfg; this._last = JSON.stringify(cfg);
+    this.dispatchEvent(new CustomEvent("config-changed", { detail: { config: cfg }, bubbles: true, composed: true }));
+  }
+  _set(patch, rerender = false) {
+    const c = { ...this._config, ...patch };
+    for (const k of Object.keys(patch)) if (patch[k] === undefined || patch[k] === "") delete c[k];
+    for (const [o] of Object.entries(LEGACY_KEYS)) delete c[o];
+    if (!c.type) c.type = `custom:${CARD_TAG}`;
+    this._emit(c);
+    if (rerender) this._render();
+  }
+  _field(label, inner, help) { return `<div class="field"><div class="label">${esc(label)}</div>${inner}${help ? `<div class="tiny">${esc(help)}</div>` : ""}</div>`; }
+  _check(id, label, help, on) { return `<div class="row"><label for="${id}">${esc(label)}${help ? `<div class="muted">${esc(help)}</div>` : ""}</label><input type="checkbox" id="${id}" ${on ? "checked" : ""}></div>`; }
+  _ent(key, label, help) { return this._field(label, `<div data-slot="${key}"></div>`, help); }
+  _text(id, value, max = 70, ph = "") { return `<input class="input" type="text" id="${id}" maxlength="${max}" value="${esc(value)}" placeholder="${esc(ph)}">`; }
+  _select(id, opts, v) { return `<select class="input" id="${id}">${opts.map(([k, n]) => `<option value="${esc(k)}" ${v === k ? "selected" : ""}>${esc(n)}</option>`).join("")}</select>`; }
+
+  _play(n) {
+    return `<div class="heading">${esc(this._t("t_play"))}</div><div class="desc">${esc(this._t("play_desc"))}</div>` +
+      this._ent("audio_entity", this._t("e_audio"), this._t("e_audio_h")) +
+      this._field(this._t("e_name"), this._text("audio_name", n.audio_name, 70, this._t("audio")), this._t("e_name_h")) +
+      this._check("show_audio", this._t("e_panel"), this._t("e_panel_h"), n.show_audio) +
+      this._check("show_progress", this._t("e_progress"), this._t("e_progress_h"), n.show_progress) +
+      this._field(this._t("e_artwork"), this._select("artwork_source", [["audio", this._t("e_art_audio")], ["streaming", this._t("e_art_st")], ["none", this._t("e_art_none")]], n.artwork_source));
+  }
+  _modBody(k, n) {
+    if (k === "tv") return this._ent("tv_entity", this._t("e_tv")) + this._field(this._t("e_name"), this._text("tv_name", n.tv_name, 70, this._t("tv")), this._t("e_name_h")) +
+      this._ent("tv_remote", this._t("e_tv_remote"), this._t("e_tv_remote_h")) + this._ent("tv_on_script", this._t("e_on_script"), this._t("e_on_script_h")) + this._ent("tv_off_script", this._t("e_off_script"), this._t("e_off_script_h")) +
+      this._field(this._t("e_target"), this._select("remote_target", [["auto", this._t("tg_auto")], ["tv", this._t("tg_tv")], ["streaming", this._t("tg_st")]], n.remote_target), this._t("e_target_h"));
+    if (k === "streaming") return this._ent("streaming_entity", this._t("e_st")) + this._field(this._t("e_name"), this._text("streaming_name", n.streaming_name, 70, this._t("streaming")), this._t("e_name_h")) +
+      this._ent("streaming_remote", this._t("e_st_remote"), this._t("e_st_remote_h")) + this._check("streaming_adb_power", this._t("e_adb"), this._t("e_adb_h"), n.streaming_adb_power) +
+      this._check("show_apps", this._t("e_show_apps"), "", n.show_apps) +
+      this._field(this._t("e_apps"), n.apps.map((a, i) => `<div class="item"><div class="top"><input type="text" data-app-name="${i}" maxlength="40" value="${esc(a.name)}" placeholder="${esc(this._t("app_name"))}" aria-label="${esc(this._t("app_name"))}"><div class="ctl"><button type="button" class="action" data-amv="${i}:-1" ${i === 0 ? "disabled" : ""} aria-label="↑">↑</button><button type="button" class="action" data-amv="${i}:1" ${i === n.apps.length - 1 ? "disabled" : ""} aria-label="↓">↓</button><button type="button" class="action" data-adel="${i}" aria-label="${esc(this._t("remove"))}">✕</button></div></div><div class="top sub"><input type="text" data-app-id="${i}" maxlength="120" value="${esc(a.app_id)}" placeholder="${esc(this._t("app_id"))}" aria-label="${esc(this._t("app_id"))}" spellcheck="false" autocapitalize="off"></div><div class="sub" data-slot="app-icon-${i}"></div></div>`).join("") + `<button type="button" class="action wide" data-aadd ${n.apps.length >= 20 ? "disabled" : ""}>${esc(this._t("add_app"))}</button>`, this._t("e_apps_h"));
+    if (k === "light") return this._ent("light_entity", this._t("e_light")) + this._field(this._t("e_name"), this._text("light_name", n.light_name, 70, this._t("light")), this._t("e_name_h"));
+    return this._field(this._t("e_scripts"), n.scripts.map((s, i) => `<div class="item"><div class="top"><input type="text" data-script-name="${i}" maxlength="60" value="${esc(s.name)}" placeholder="${esc(this._t("script_name"))}" aria-label="${esc(this._t("script_name"))}"><div class="ctl"><button type="button" class="action" data-sdel="${i}" aria-label="${esc(this._t("remove"))}">✕</button></div></div><div class="sub" data-slot="script-${i}"></div></div>`).join("") + `<button type="button" class="action wide" data-sadd ${n.scripts.length >= 30 ? "disabled" : ""}>${esc(this._t("add_script"))}</button>`);
+  }
+  _mods(n) {
+    const names = { tv: this._t("tv"), streaming: this._t("streaming"), light: this._t("light"), scripts: this._t("scripts") };
+    let h = `<div class="heading">${esc(this._t("t_mods"))}</div><div class="desc">${esc(this._t("mods_desc"))}</div>`;
+    n.order.forEach((k, i) => {
+      const on = n[MOD_FLAG[k]];
+      h += `<div class="mod"><div class="mh"><div class="nm">${esc(names[k])}</div><div class="ctl"><button type="button" class="action" data-move="${i}:-1" aria-label="${esc(this._t("mv_up", names[k]))}" ${i === 0 ? "disabled" : ""}>↑</button><button type="button" class="action" data-move="${i}:1" aria-label="${esc(this._t("mv_dn", names[k]))}" ${i === n.order.length - 1 ? "disabled" : ""}>↓</button></div></div>
+        <div class="muted" style="margin-top:6px">${esc(this._t(`h_${k}`))}</div><div class="mb"><div class="chk"><input type="checkbox" id="${MOD_FLAG[k]}" ${on ? "checked" : ""}><label for="${MOD_FLAG[k]}">${esc(this._t("mod_on"))}</label></div>${on ? this._modBody(k, n) : ""}</div></div>`;
     });
-    this.shadowRoot.querySelectorAll("button").forEach(b=>b.addEventListener("click",()=>this._onButton(b)));
-    this.shadowRoot.querySelectorAll("[data-check]").forEach(el=>el.addEventListener("change",()=>{this._set(el.dataset.check,el.checked);if(["show_title","show_eyebrow"].includes(el.dataset.check))this._render();}));
-    this.shadowRoot.querySelectorAll("[data-text]").forEach(el=>el.addEventListener("change",()=>this._set(el.dataset.text,el.value)));
-    this.shadowRoot.querySelectorAll("[data-theme]").forEach(el=>el.addEventListener("change",()=>this._set("theme",el.value)));
-    this.shadowRoot.querySelectorAll("[data-artwork]").forEach(el=>el.addEventListener("change",()=>this._set("artwork_source",el.value)));
-    this.shadowRoot.querySelectorAll("[data-script-name]").forEach(el=>el.addEventListener("change",()=>{
-      const arr=this._config.scripts.map(s=>({...s}));if(arr[Number(el.dataset.scriptName)]) {arr[Number(el.dataset.scriptName)].name=el.value.slice(0,60);this._set("scripts",arr);}
-    }));
+    return h + this._diag(n);
   }
-  _diagHtml(){
-    const c=this._config,states=this._hass?.states;
-    const yn=v=>`<span class="${v?"y":"n"}">${v?"Sì":"No"}</span>`;
-    const items=[
-      ["TV",c.tv_entity,[["Accensione",MEDIA_TURN_ON],["Spegnimento",MEDIA_TURN_OFF],["Sorgenti",MEDIA_SELECT_SOURCE]]],
-      ["Home Theater",c.audio_entity,[["Livello volume","level"],["Volume",4],["Mute",8],["Precedente",MEDIA_PREVIOUS_TRACK],["Successiva",MEDIA_NEXT_TRACK]]],
-      ["Lettore streaming",c.streaming_entity,[["Accensione",MEDIA_TURN_ON],["Spegnimento",MEDIA_TURN_OFF],["Sorgenti",MEDIA_SELECT_SOURCE]]],
-      ["Luci LED TV",c.light_entity,[]]
+  _look(n) {
+    return `<div class="heading">${esc(this._t("t_look"))}</div>` +
+      this._field(this._t("e_eyebrow"), this._text("eyebrow", n.eyebrow, 60)) +
+      this._field(this._t("e_title"), this._text("title", n.title, 60), this._t("e_title_h")) +
+      this._check("show_eyebrow", this._t("e_show_eyebrow"), "", n.show_eyebrow) +
+      this._check("show_title", this._t("e_show_title"), "", n.show_title) +
+      this._check("highlight_on", this._t("e_highlight"), this._t("e_highlight_h"), n.highlight_on) +
+      this._field(this._t("e_theme"), this._select("theme", [["auto", this._t("th_auto")], ["light", "Light Edera"], ["dark", "Dark Edera"]], n.theme)) +
+      this._field(this._t("e_lang"), this._select("language", [["auto", this._t("lang_auto")], ...LANGS], n.language), this._t("e_lang_h"));
+  }
+  _diag(n) {
+    const states = this._hass?.states, yn = v => `<span class="${v ? "y" : "n"}">${esc(this._t(v ? "yes" : "no"))}</span>`;
+    const items = [
+      [this._t("tv"), n.tv_entity, [["f_on", F.TURN_ON], ["f_off", F.TURN_OFF], ["f_src", F.SELECT_SOURCE]]],
+      [this._t("audio"), n.audio_entity, [["f_level", "level"], ["f_vol", F.VOLUME_SET], ["f_mute", F.VOLUME_MUTE], ["f_prev", F.PREVIOUS], ["f_next", F.NEXT]]],
+      [this._t("streaming"), n.streaming_entity, [["f_on", F.TURN_ON], ["f_off", F.TURN_OFF], ["f_src", F.SELECT_SOURCE]]],
+      [this._t("light"), n.light_entity, []]
     ];
-    const rows=items.map(([name,id,feats])=>{
-      const st=id&&states?states[id]:undefined;
-      let status,detail="";
-      if(!id)status="Da configurare";
-      else if(!states)status="Stato non disponibile";
-      else if(!st)status="Entità non trovata";
-      else if(!validState(st)){status=`Non disponibile (${escapeHtml(st.state)})`;detail="Le funzioni non sono rilevabili finché il dispositivo non risponde.";}
-      else{
-        status=`Disponibile · ${escapeHtml(st.state)}`;
-        detail=feats.map(([label,f])=>`${label} ${yn(f==="level"?typeof st.attributes?.volume_level==="number":supports(st,f))}`).join(" · ");
-      }
-      return `<div class="diag-row"><div class="dn">${escapeHtml(name)}</div><div class="ds">${status}</div>${detail?`<div class="df">${detail}</div>`:""}</div>`;
-    }).join("");
-    return `<div class="setting-group"><div class="group-title">Diagnostica</div><div class="diag">${rows}</div><p class="editor-small">Mostra le funzioni che ogni entità dichiara adesso. Riapri questa scheda per aggiornare i dati.</p></div>`;
+    return `<div class="heading">${esc(this._t("diag"))}</div><div class="diag">${items.map(([name, id, feats]) => {
+      const st = id && states ? states[id] : undefined;
+      let status, detail = "";
+      if (!id) status = this._t("d_todo");
+      else if (!st) status = this._t("d_nf");
+      else if (!validState(st)) status = `${this._t("d_na")} (${st.state})`;
+      else { status = `${this._t("d_ok")} · ${st.state}`; detail = feats.map(([k, f]) => `${esc(this._t(k))} ${yn(f === "level" ? typeof st.attributes?.volume_level === "number" : supports(st, f))}`).join(" · "); }
+      return `<div class="diag-row"><div class="dn">${esc(name)}</div><div class="ds">${esc(status)}</div>${detail ? `<div class="df">${detail}</div>` : ""}</div>`;
+    }).join("")}</div><p class="tiny">${esc(this._t("diag_h"))}</p>`;
   }
-  _onButton(btn){
-    if(btn.hasAttribute("data-clear-entity")){
-      const key=btn.dataset.clearEntity;
-      if(!Object.hasOwn(DEFAULT,key) || !["tv_entity","tv_remote","tv_on_script","tv_off_script","streaming_entity","streaming_remote","audio_entity","light_entity"].includes(key))return;
-      this._set(key,"");this._render();return;
+  _mount(slot, selector, value, cb) {
+    const el = document.createElement("ha-selector");
+    el.hass = this._hass; el.selector = selector; el.value = value; el.required = false;
+    el.addEventListener("value-changed", ev => { ev.stopPropagation(); cb(ev.detail ? ev.detail.value : undefined); });
+    slot.appendChild(el);
+  }
+  _render() {
+    const n = this._n(), t = this._tab;
+    const act = this.shadowRoot.activeElement?.id || "";
+    this.shadowRoot.innerHTML = `<style>${EDITOR_CSS}</style><div class="ed"><div class="tabs" role="group" aria-label="${esc(this._t("tabs"))}">${[["play", "t_play"], ["mods", "t_mods"], ["look", "t_look"]].map(([k, l]) => `<button type="button" class="tab" data-tab="${k}" aria-pressed="${t === k}">${esc(this._t(l))}</button>`).join("")}</div>${t === "play" ? this._play(n) : t === "mods" ? this._mods(n) : this._look(n)}</div>`;
+    this._built = true;
+    const sl = name => this.shadowRoot.querySelector(`[data-slot="${name}"]`);
+    const ents = { audio_entity: "media_player", tv_entity: "media_player", tv_remote: "remote", tv_on_script: "script", tv_off_script: "script", streaming_entity: "media_player", streaming_remote: "remote", light_entity: "light" };
+    for (const [k, d] of Object.entries(ents)) { const s = sl(k); if (s) this._mount(s, { entity: { domain: d } }, n[k] || undefined, v => this._set({ [k]: v || undefined }, k === "audio_entity" || k === "tv_entity" || k === "streaming_entity" || k === "light_entity")); }
+    n.apps.forEach((a, i) => { const s = sl(`app-icon-${i}`); if (s) this._mount(s, { icon: {} }, a.icon || undefined, v => { const apps = this._n().apps.map(x => ({ ...x })); if (apps[i]) { apps[i].icon = iconOk(v) ? v : ""; this._set({ apps }); } }); });
+    n.scripts.forEach((x, i) => { const s = sl(`script-${i}`); if (s) this._mount(s, { entity: { domain: "script" } }, x.entity_id || undefined, v => { const scripts = this._n().scripts.map(y => ({ ...y })); if (scripts[i]) { scripts[i].entity_id = v || ""; this._set({ scripts }); } }); });
+    if (act) { const el = this.shadowRoot.getElementById(act); if (el && !el.disabled) el.focus({ preventScroll: true }); }
+  }
+  _click(e) {
+    let b = e.target.closest("[data-tab]"); if (b) { this._tab = b.dataset.tab; this._render(); return; }
+    b = e.target.closest("button"); if (!b || b.disabled) return;
+    const n = this._n();
+    const swap = (arr, spec) => { const [i, d] = spec.split(":").map(Number), j = i + d; if (j < 0 || j >= arr.length) return null; const o = arr.slice(); [o[i], o[j]] = [o[j], o[i]]; return o; };
+    if (b.dataset.move) { const o = swap(n.order, b.dataset.move); if (o) this._set({ order: o }, true); return; }
+    if (b.dataset.amv) { const o = swap(n.apps, b.dataset.amv); if (o) this._set({ apps: o }, true); return; }
+    if (b.dataset.adel !== undefined) { this._set({ apps: n.apps.filter((_, i) => i !== Number(b.dataset.adel)) }, true); return; }
+    if (b.hasAttribute("data-aadd")) { this._set({ apps: [...n.apps, { name: "", app_id: "", icon: "" }] }, true); return; }
+    if (b.dataset.sdel !== undefined) { this._set({ scripts: n.scripts.filter((_, i) => i !== Number(b.dataset.sdel)) }, true); return; }
+    if (b.hasAttribute("data-sadd")) this._set({ scripts: [...n.scripts, { name: "", entity_id: "" }] }, true);
+  }
+  _change(e) {
+    const el = e.target, n = this._n();
+    if (el.type === "checkbox") {
+      const rer = ["show_tv", "show_streaming", "show_light", "show_scripts"].includes(el.id);
+      this._set({ [el.id]: el.checked }, rer); return;
     }
-    if(btn.hasAttribute("data-clear-script")){
-      const i=Number(btn.dataset.clearScript);
-      if(!Number.isInteger(i)||i<0||i>=this._config.scripts.length)return;
-      const scripts=this._config.scripts.map((entry,j)=>j===i?{...entry,entity_id:""}:{...entry});
-      this._set("scripts",scripts);this._render();return;
+    if (["eyebrow", "title", "tv_name", "streaming_name", "audio_name", "light_name"].includes(el.id)) { this._set({ [el.id]: el.value.trim() || undefined }); return; }
+    if (["artwork_source", "remote_target", "theme"].includes(el.id)) { this._set({ [el.id]: el.value }); return; }
+    if (el.id === "language") { this._set({ language: el.value === "auto" ? undefined : el.value }, true); return; }
+    if (el.dataset.appName !== undefined || el.dataset.appId !== undefined) {
+      const i = Number(el.dataset.appName ?? el.dataset.appId), apps = n.apps.map(x => ({ ...x }));
+      if (!apps[i]) return;
+      if (el.dataset.appName !== undefined) apps[i].name = el.value.slice(0, 40); else apps[i].app_id = el.value.trim().slice(0, 120);
+      this._set({ apps }); return;
     }
-    if(btn.dataset.tab){this._tab=btn.dataset.tab;this._render();return;}
-    if(btn.dataset.toggle){const k=btn.dataset.toggle;this._set(k,!this._config[k]);btn.classList.toggle("on",this._config[k]);btn.setAttribute("aria-checked",String(this._config[k]));return;}
-    if(btn.dataset.preset){
-      const mode=btn.dataset.preset;
-      const change={};for(const [k] of GROUPS)change[k]=mode==="all"||(mode==="tv"&&k==="show_tv")||(mode==="alexa"&&k==="show_audio");
-      this._change(change);this._render();return;
-    }
-    if(btn.hasAttribute("data-add-script")){
-      if(this._config.scripts.length>=30)return;
-      this._change({scripts:[...this._config.scripts,{name:"",entity_id:""}]});this._render();return;
-    }
-    if(btn.dataset.remove!==undefined){
-      const i=Number(btn.dataset.remove);
-      this._change({scripts:this._config.scripts.filter((_,idx)=>idx!==i)});this._render();
-    }
+    if (el.dataset.scriptName !== undefined) { const i = Number(el.dataset.scriptName), scripts = n.scripts.map(x => ({ ...x })); if (scripts[i]) { scripts[i].name = el.value.slice(0, 60); this._set({ scripts }); } }
   }
 }
-if(!customElements.get(CARD_TAG))customElements.define(CARD_TAG,MediaFusionCard);
-if(!customElements.get(EDITOR_TAG))customElements.define(EDITOR_TAG,MediaFusionCardEditor);
-window.customCards=window.customCards||[];
-if(!window.customCards.some(c=>c.type===CARD_TAG))window.customCards.push({
-  type:CARD_TAG,name:"Media Fusion Card",description:"Controlli media, volume, telecomandi, luci e script in una card modulare",preview:true
+
+if (!customElements.get(CARD_TAG)) customElements.define(CARD_TAG, MediaFusionCard);
+if (!customElements.get(EDITOR_TAG)) customElements.define(EDITOR_TAG, MediaFusionCardEditor);
+window.customCards = window.customCards || [];
+if (!window.customCards.some(c => c.type === CARD_TAG)) window.customCards.push({
+  type: CARD_TAG, name: "Media Fusion Card", description: "Controlli media, volume, telecomandi, luci e script in una card modulare", preview: true
 });
+console.info(`%c MEDIA-FUSION-CARD %c ${VERSION} `, "color:#fff;background:#0a7156;font-weight:700", "color:#0a7156;background:#fff");
 })();
